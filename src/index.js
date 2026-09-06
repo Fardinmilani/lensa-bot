@@ -8,6 +8,13 @@ import {
   handleListAdmins,
   handleListPlans,
   handleSetPlan,
+  handleAdminMenu,
+  handleAdminListCallback,
+  handleAdminUserListCallback,
+  handleAdminRemoveCallback,
+  handleAdminAddCallback,
+  handleAdminPlanUserCallback,
+  handleAdminPlanPickCallback,
 } from "./commands/admin.js";
 import { handleSignalStart, handleWizardText, handleWizardCallback } from "./commands/signal.js";
 import { formatDetailMessage } from "./signalFormat.js";
@@ -23,7 +30,8 @@ const HELP_TEXT =
   "دستورهای ادمین:\n" +
   "/addadmin ، /removeadmin ، /listadmins\n" +
   "/setplan TELEGRAM_ID PLAN_NAME\n" +
-  "/stats";
+  "/stats\n" +
+  "/admin — مدیریت ادمین با دکمه‌ها";
 
 /** "/addadmin@MyBot 123 alice" -> { command: "addadmin", args: ["123", "alice"] } */
 function parseCommand(text) {
@@ -46,6 +54,7 @@ const ADMIN_COMMANDS = {
   listadmins: handleListAdmins,
   setplan: handleSetPlan,
   stats: handleStats,
+  admin: handleAdminMenu,
 };
 
 async function routeMessage(env, message) {
@@ -83,6 +92,37 @@ async function routeMessage(env, message) {
 
 async function routeCallbackQuery(env, callbackQuery) {
   const data = callbackQuery.data ?? "";
+
+  if (data.startsWith("adm:")) {
+    if (!(await db.isAdmin(env, callbackQuery.from.id))) {
+      await answerCallbackQuery(env, callbackQuery.id, "این منو فقط برای ادمین‌هاست.");
+      return;
+    }
+
+    const [, action, value, extra] = data.split(":");
+    await answerCallbackQuery(env, callbackQuery.id);
+
+    if (action === "menu") {
+      await handleAdminMenu(env, { chat: callbackQuery.message.chat });
+    } else if (action === "removelist") {
+      await handleAdminListCallback(env, callbackQuery);
+    } else if (action === "removepick") {
+      await handleAdminRemoveCallback(env, callbackQuery, Number(value));
+    } else if (action === "addlist") {
+      await handleAdminUserListCallback(env, callbackQuery, "add", Math.max(0, Number(value) || 0));
+    } else if (action === "addpick") {
+      await handleAdminAddCallback(env, callbackQuery, Number(value));
+    } else if (action === "planlist") {
+      await handleAdminUserListCallback(env, callbackQuery, "plan", Math.max(0, Number(value) || 0));
+    } else if (action === "planuser") {
+      await handleAdminPlanUserCallback(env, callbackQuery, Number(value));
+    } else if (action === "planpick") {
+      await handleAdminPlanPickCallback(env, callbackQuery, Number(value), extra ?? "");
+    } else if (action === "stats") {
+      await handleStats(env, { chat: callbackQuery.message.chat });
+    }
+    return;
+  }
 
   if (data.startsWith("wz:")) {
     const session = await db.getSession(env, callbackQuery.from.id);

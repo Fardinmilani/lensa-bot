@@ -58,3 +58,19 @@ test("fetchCurrentPrice parses the price as a number", async () => {
     restore();
   }
 });
+
+test("fetchCandles turns an HTML/upstream response into a readable MarketDataError", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response("<!DOCTYPE html><html>temporarily unavailable</html>", {
+    status: 503,
+    headers: { "content-type": "text/html" },
+  });
+  try {
+    await assert.rejects(
+      () => fetchCandles("BTCUSDT", "4h", 300),
+      (err) => err instanceof MarketDataError && /JSON معتبر نداد/.test(err.message) && !/Unexpected token/.test(err.message)
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});

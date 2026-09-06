@@ -19,6 +19,17 @@ export function normalizeSymbol(input) {
 
 export class MarketDataError extends Error {}
 
+async function readJsonResponse(res, endpoint) {
+  const raw = await res.text();
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new MarketDataError(
+      `سرویس بازار برای ${endpoint} پاسخ JSON معتبر نداد (HTTP ${res.status}). چند لحظه بعد دوباره امتحان کن.`
+    );
+  }
+}
+
 /**
  * Returns candles as [{ time (unix SECONDS -- backtest.js's
  * estimatePeriodsPerYear divides by this unit for Sharpe annualization,
@@ -31,7 +42,7 @@ export async function fetchCandles(symbol, timeframe, limit = 300) {
   }
   const url = `${BINANCE_BASE}/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${timeframe}&limit=${limit}`;
   const res = await fetch(url, { headers: { Accept: "application/json" } });
-  const body = await res.json();
+  const body = await readJsonResponse(res, `کندل ${symbol}`);
 
   if (!res.ok || !Array.isArray(body)) {
     const msg = body?.msg || `HTTP ${res.status}`;
@@ -55,7 +66,7 @@ export async function fetchCandles(symbol, timeframe, limit = 300) {
 export async function fetchCurrentPrice(symbol) {
   const url = `${BINANCE_BASE}/api/v3/ticker/price?symbol=${encodeURIComponent(symbol)}`;
   const res = await fetch(url, { headers: { Accept: "application/json" } });
-  const body = await res.json();
+  const body = await readJsonResponse(res, `قیمت ${symbol}`);
   if (!res.ok || !body?.price) {
     throw new MarketDataError(`گرفتن قیمت لحظه‌ای ${symbol} شکست خورد: ${body?.msg || res.status}`);
   }
@@ -76,7 +87,7 @@ export async function fetchCurrentPrices(symbols) {
   }
   const url = `${BINANCE_BASE}/api/v3/ticker/price?symbols=${encodeURIComponent(JSON.stringify(unique))}`;
   const res = await fetch(url, { headers: { Accept: "application/json" } });
-  const body = await res.json();
+  const body = await readJsonResponse(res, "قیمت‌ها");
   if (!res.ok || !Array.isArray(body)) {
     throw new MarketDataError(`گرفتن قیمت‌های لحظه‌ای شکست خورد: ${body?.msg || res.status}`);
   }

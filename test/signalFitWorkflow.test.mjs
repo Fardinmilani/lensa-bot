@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { createD1Shim } from "./d1-shim.mjs";
 import * as db from "../src/db.js";
 import { SignalFitWorkflow } from "../src/workflows/signalFitWorkflow.js";
+import { STRATEGIES } from "../src/lib/strategies.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const schema = readFileSync(join(__dirname, "..", "schema.sql"), "utf8");
@@ -201,5 +202,51 @@ test("candle fetch failure marks the request failed and notifies the user, witho
     assert.ok(sent, "user should be told the fetch failed");
   } finally {
     globalThis.fetch = original;
+  }
+});
+
+test("a mid-fit strategy failure marks the request failed and still notifies the user", async () => {
+  const env = freshEnv();
+  await db.getOrCreateUser(env, 555, "fardin");
+  const requestId = await db.createSignalRequest(env, {
+    userId: 555,
+    symbol: "BTCUSDT",
+    timeframe: "4h",
+    leverage: 5,
+    stopLossPercent: 10,
+    takeProfitPercent: 100,
+  });
+
+  const key = Object.keys(STRATEGIES).find((name) => STRATEGIES[name].category !== "benchmark");
+  const originalGenerateSignals = STRATEGIES[key].generateSignals;
+  const telegramCalls = [];
+  const originalFetch = globalThis.fetch;
+  STRATEGIES[key].generateSignals = () => {
+    throw new Error("forced strategy failure");
+  };
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u.includes("api.binance.com/api/v3/klines")) return new Response(JSON.stringify(binanceKlines(300)), { status: 200 });
+    if (u.includes("api.telegram.org")) {
+      telegramCalls.push({ body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    throw new Error("unexpected fetch: " + u);
+  };
+
+  try {
+    const wf = new SignalFitWorkflow({}, env);
+    const result = await wf.run(
+      { payload: { requestId, userId: 555, chatId: 555, symbol: "BTCUSDT", timeframe: "4h", leverage: 5, stopLossPercent: 10, takeProfitPercent: 100 } },
+      fakeStep()
+    );
+
+    assert.equal(result.outcome, "error");
+    const req = await env.DB.prepare("SELECT status FROM signal_requests WHERE id = ?").bind(requestId).first();
+    assert.equal(req.status, "failed");
+    assert.ok(telegramCalls.some((call) => call.body?.text?.includes("خطای غیرمنتظره")), "user should receive the mid-fit failure message");
+  } finally {
+    STRATEGIES[key].generateSignals = originalGenerateSignals;
+    globalThis.fetch = originalFetch;
   }
 });

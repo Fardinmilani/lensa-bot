@@ -62,6 +62,18 @@ function makeMessage(text, { id = 999, username = "fardin" } = {}) {
   };
 }
 
+function makeCallback(data, { id = 999 } = {}) {
+  return {
+    update_id: Math.floor(Math.random() * 1e6),
+    callback_query: {
+      id: `callback-${Math.floor(Math.random() * 1e6)}`,
+      from: { id, is_bot: false, first_name: "Test", username: id === 999 ? "fardin" : `user${id}` },
+      message: { message_id: 1, chat: { id, type: "private" } },
+      data,
+    },
+  };
+}
+
 test("GET requests get a plain liveness response, no side effects", async () => {
   const env = freshEnv();
   const res = await worker.fetch(new Request("https://example.com/", { method: "GET" }), env, makeCtx());
@@ -138,3 +150,94 @@ test("/addadmin by the owner actually grants admin rights to the target", async 
     tg.restore();
   }
 });
+
+test("/admin exposes button flows for adding admins and changing plans", async () => {
+  const env = freshEnv();
+  const tg = mockTelegramFetch();
+  try {
+    let ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeMessage("/start", { id: 999 })), env, ctx);
+    await ctx.settle();
+
+    for (const user of [
+      { id: 222, username: "alice" },
+      { id: 333, username: "bob" },
+    ]) {
+      ctx = makeCtx();
+      await worker.fetch(webhookRequest(makeMessage("/start", user)), env, ctx);
+      await ctx.settle();
+    }
+
+    tg.calls.length = 0;
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeMessage("/admin")), env, ctx);
+    await ctx.settle();
+    const menu = tg.calls.find((call) => call.url.includes("/sendMessage"));
+    assert.ok(menu.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "adm:addlist:0"));
+
+    tg.calls.length = 0;
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback("adm:addlist:0")), env, ctx);
+    await ctx.settle();
+    const addPicker = tg.calls.find((call) => call.url.includes("/sendMessage"));
+    assert.ok(addPicker.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "adm:addpick:222"));
+
+    tg.calls.length = 0;
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback("adm:addpick:222")), env, ctx);
+    await ctx.settle();
+    assert.equal(await dbIsAdmin(env, 222), true);
+
+    tg.calls.length = 0;
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback("adm:planlist:0")), env, ctx);
+    await ctx.settle();
+    const planPicker = tg.calls.find((call) => call.url.includes("/sendMessage"));
+    assert.ok(planPicker.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "adm:planuser:333"));
+
+    tg.calls.length = 0;
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback("adm:planuser:333")), env, ctx);
+    await ctx.settle();
+    const planButtons = tg.calls.find((call) => call.url.includes("/sendMessage"));
+    assert.ok(planButtons.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "adm:planpick:333:unlimited"));
+
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback("adm:planpick:333:unlimited")), env, ctx);
+    await ctx.settle();
+    const user = await env.DB.prepare("SELECT plan_id FROM users WHERE telegram_id = 333").first();
+    assert.equal(user.plan_id, 2);
+  } finally {
+    tg.restore();
+  }
+});
+
+test("stale admin callbacks are rejected after the user loses admin access", async () => {
+  const env = freshEnv();
+  const tg = mockTelegramFetch();
+  try {
+    await dbAddAdmin(env, 222, 999, "alice");
+    await dbRemoveAdmin(env, 222);
+    const ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback("adm:menu", { id: 222 })), env, ctx);
+    await ctx.settle();
+    const answer = tg.calls.find((call) => call.url.includes("answerCallbackQuery"));
+    assert.match(answer.body.text, /فقط برای ادمین/);
+    assert.equal(tg.calls.filter((call) => call.url.includes("/sendMessage")).length, 0);
+  } finally {
+    tg.restore();
+  }
+});
+
+async function dbIsAdmin(env, id) {
+  const row = await env.DB.prepare("SELECT 1 FROM admins WHERE telegram_id = ?").bind(id).first();
+  return Boolean(row);
+}
+
+async function dbAddAdmin(env, id, addedBy, username) {
+  await env.DB.prepare("INSERT INTO admins (telegram_id, username, added_by) VALUES (?, ?, ?)").bind(id, username, addedBy).run();
+}
+
+async function dbRemoveAdmin(env, id) {
+  await env.DB.prepare("DELETE FROM admins WHERE telegram_id = ?").bind(id).run();
+}

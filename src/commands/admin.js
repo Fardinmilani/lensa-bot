@@ -3,6 +3,122 @@ import * as db from "../db.js";
 
 /** All handlers here assume the caller has already been checked with db.isAdmin(). */
 
+const PICKER_PAGE_SIZE = 10;
+
+function adminMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "👤 ادمین‌ها", callback_data: "adm:removelist" },
+        { text: "➕ افزودن ادمین", callback_data: "adm:addlist:0" },
+      ],
+      [
+        { text: "📋 تغییر پلن", callback_data: "adm:planlist:0" },
+        { text: "📊 آمار", callback_data: "adm:stats" },
+      ],
+    ],
+  };
+}
+
+function backToAdminMenuButton() {
+  return { text: "↩️ منوی ادمین", callback_data: "adm:menu" };
+}
+
+function pickerUserLabel(user) {
+  return user.username ? `@${user.username}` : String(user.telegram_id);
+}
+
+function pickerNavigation(prefix, offset, hasNext) {
+  const row = [];
+  if (offset > 0) row.push({ text: "◀️ قبلی", callback_data: `${prefix}:${Math.max(0, offset - PICKER_PAGE_SIZE)}` });
+  if (hasNext) row.push({ text: "بعدی ▶️", callback_data: `${prefix}:${offset + PICKER_PAGE_SIZE}` });
+  return row;
+}
+
+async function sendUserPicker(env, chatId, { mode, offset }) {
+  const users = await db.listUsersForAdminPicker(env, { excludeAdmins: true, limit: PICKER_PAGE_SIZE, offset });
+  const keyboard = users.map((user) => [
+    {
+      text: pickerUserLabel(user),
+      callback_data: mode === "add" ? `adm:addpick:${user.telegram_id}` : `adm:planuser:${user.telegram_id}`,
+    },
+  ]);
+  const prefix = mode === "add" ? "adm:addlist" : "adm:planlist";
+  const navigation = pickerNavigation(prefix, offset, users.length === PICKER_PAGE_SIZE);
+  if (navigation.length > 0) keyboard.push(navigation);
+  keyboard.push([backToAdminMenuButton()]);
+
+  const emptyText = mode === "add" ? "کاربر غیرادمینی برای افزودن پیدا نشد." : "کاربر غیرادمینی برای تغییر پلن پیدا نشد.";
+  return sendMessage(env, chatId, users.length > 0 ? (mode === "add" ? "➕ کاربر موردنظر برای افزودن به ادمین‌ها را انتخاب کن:" : "📋 کاربر موردنظر برای تغییر پلن را انتخاب کن:") : emptyText, {
+    reply_markup: { inline_keyboard: keyboard },
+  });
+}
+
+export async function handleAdminMenu(env, message) {
+  return sendMessage(env, message.chat.id, "🛠 <b>مدیریت ادمین</b>\nاز منوی زیر انتخاب کن:", { reply_markup: adminMenuKeyboard() });
+}
+
+export async function handleAdminUserListCallback(env, callbackQuery, mode, offset) {
+  return sendUserPicker(env, callbackQuery.message.chat.id, { mode, offset });
+}
+
+export async function handleAdminListCallback(env, callbackQuery) {
+  const admins = await db.listAdmins(env);
+  const keyboard = admins.map((admin) => [
+    {
+      text: `❌ حذف ${admin.username ? `@${admin.username}` : admin.telegram_id}`,
+      callback_data: `adm:removepick:${admin.telegram_id}`,
+    },
+  ]);
+  keyboard.push([backToAdminMenuButton()]);
+  const lines = admins.map((admin) => `• <code>${admin.telegram_id}</code>${admin.username ? ` @${escapeHtml(admin.username)}` : ""}`);
+  return sendMessage(
+    env,
+    callbackQuery.message.chat.id,
+    admins.length > 0 ? `👤 <b>ادمین‌ها</b>\n${lines.join("\n")}\n\nبرای حذف روی دکمه‌ی مربوط بزن:` : "هیچ ادمینی ثبت نشده.",
+    { reply_markup: { inline_keyboard: keyboard } }
+  );
+}
+
+export async function handleAdminRemoveCallback(env, callbackQuery, targetId) {
+  const chatId = callbackQuery.message.chat.id;
+  if (String(targetId) === String(callbackQuery.from.id)) {
+    return sendMessage(env, chatId, "نمی‌تونی خودت رو حذف کنی.");
+  }
+  const removed = await db.removeAdmin(env, targetId);
+  return sendMessage(env, chatId, removed ? `✅ کاربر <code>${targetId}</code> از لیست ادمین‌ها حذف شد.` : `کاربر <code>${targetId}</code> اصلاً ادمین نبود.`);
+}
+
+export async function handleAdminAddCallback(env, callbackQuery, targetId) {
+  const chatId = callbackQuery.message.chat.id;
+  const user = await db.getUserForAdminPicker(env, targetId, { excludeAdmin: true });
+  if (!user) return sendMessage(env, chatId, "این کاربر دیگر برای افزودن معتبر نیست. دوباره فهرست را باز کن.");
+  await db.addAdmin(env, user.telegram_id, callbackQuery.from.id, user.username);
+  return sendMessage(env, chatId, `✅ کاربر <code>${user.telegram_id}</code> به لیست ادمین‌ها اضافه شد.`);
+}
+
+export async function handleAdminPlanUserCallback(env, callbackQuery, targetId) {
+  const chatId = callbackQuery.message.chat.id;
+  const user = await db.getUserForAdminPicker(env, targetId, { excludeAdmin: true });
+  if (!user) return sendMessage(env, chatId, "این کاربر دیگر برای تغییر پلن معتبر نیست. دوباره فهرست را باز کن.");
+  const plans = await db.listPlans(env);
+  const keyboard = plans.map((plan) => [{ text: plan.name, callback_data: `adm:planpick:${user.telegram_id}:${encodeURIComponent(plan.name)}` }]);
+  keyboard.push([backToAdminMenuButton()]);
+  return sendMessage(env, chatId, `📋 پلن جدید برای <code>${user.telegram_id}</code> را انتخاب کن:`, { reply_markup: { inline_keyboard: keyboard } });
+}
+
+export async function handleAdminPlanPickCallback(env, callbackQuery, targetId, encodedPlanName) {
+  const chatId = callbackQuery.message.chat.id;
+  const planName = decodeURIComponent(encodedPlanName);
+  const user = await db.getUserForAdminPicker(env, targetId);
+  const plans = await db.listPlans(env);
+  if (!user || !plans.some((plan) => plan.name === planName)) {
+    return sendMessage(env, chatId, "این انتخاب دیگر معتبر نیست. دوباره منوی ادمین را باز کن.");
+  }
+  const ok = await db.setUserPlanByName(env, targetId, planName);
+  return sendMessage(env, chatId, ok ? `✅ پلن کاربر <code>${targetId}</code> شد «${escapeHtml(planName)}».` : "تغییر پلن انجام نشد.");
+}
+
 export async function handleAddAdmin(env, message, args) {
   const chatId = message.chat.id;
   const targetId = Number(args[0]);

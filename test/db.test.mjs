@@ -55,6 +55,23 @@ test("addAdmin / removeAdmin / listAdmins round-trip", async () => {
   assert.equal(removedAgain, false, "removing an id that isn't an admin should report false, not throw");
 });
 
+test("listUsersForAdminPicker pages newest users and can exclude admins", async () => {
+  const env = freshEnv();
+  await db.getOrCreateUser(env, 111, "old_user");
+  await db.getOrCreateUser(env, 222, "admin_user");
+  await db.getOrCreateUser(env, 333, null);
+  await db.addAdmin(env, 222, 999, "admin_user");
+
+  const all = await db.listUsersForAdminPicker(env, { limit: 10 });
+  assert.equal(all.length, 3);
+  assert.deepEqual(all.map((user) => user.telegram_id).sort(), [111, 222, 333]);
+
+  const nonAdmins = await db.listUsersForAdminPicker(env, { excludeAdmins: true, limit: 10 });
+  assert.deepEqual(nonAdmins.map((user) => user.telegram_id).sort(), [111, 333]);
+  assert.equal((await db.getUserForAdminPicker(env, 222, { excludeAdmin: true })), null);
+  assert.equal((await db.getUserForAdminPicker(env, 333, { excludeAdmin: true })).telegram_id, 333);
+});
+
 test("getOrCreateUser defaults to the 'default' plan and is idempotent", async () => {
   const env = freshEnv();
   const first = await db.getOrCreateUser(env, 555, "newuser");

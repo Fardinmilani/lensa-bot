@@ -40,6 +40,38 @@ export async function listAdmins(env) {
   return results;
 }
 
+/**
+ * Small, newest-first user pages for the admin inline keyboards. The query
+ * deliberately returns only fields needed by the picker and can exclude
+ * current admins for the add-admin flow.
+ */
+export async function listUsersForAdminPicker(env, { excludeAdmins = false, limit = 10, offset = 0 } = {}) {
+  const safeLimit = Math.min(10, Math.max(1, Math.trunc(Number(limit) || 10)));
+  const safeOffset = Math.max(0, Math.trunc(Number(offset) || 0));
+  const where = excludeAdmins ? "WHERE NOT EXISTS (SELECT 1 FROM admins a WHERE a.telegram_id = u.telegram_id)" : "";
+  const { results } = await env.DB.prepare(
+    `SELECT u.telegram_id, u.username, u.joined_at
+     FROM users u
+     ${where}
+     ORDER BY u.joined_at DESC, u.telegram_id DESC
+     LIMIT ? OFFSET ?`
+  )
+    .bind(safeLimit, safeOffset)
+    .all();
+  return results;
+}
+
+export async function getUserForAdminPicker(env, telegramId, { excludeAdmin = false } = {}) {
+  const adminClause = excludeAdmin ? "AND NOT EXISTS (SELECT 1 FROM admins a WHERE a.telegram_id = u.telegram_id)" : "";
+  return env.DB.prepare(
+    `SELECT u.telegram_id, u.username
+     FROM users u
+     WHERE u.telegram_id = ? ${adminClause}`
+  )
+    .bind(telegramId)
+    .first();
+}
+
 // --- Users & plans -------------------------------------------------------
 
 export async function getOrCreateUser(env, telegramId, username) {
