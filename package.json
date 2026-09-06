@@ -1,0 +1,16 @@
+{
+  "name": "lensa-signal-bot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 execute lensa-signal-bot-db --local --file=./schema.sql",
+    "db:migrate:remote": "wrangler d1 execute lensa-signal-bot-db --remote --file=./schema.sql",
+    "test": "node --import ./test/register-loader.mjs --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.42.0"
+  }
+}

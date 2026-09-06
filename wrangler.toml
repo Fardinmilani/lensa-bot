@@ -1,0 +1,38 @@
+name = "lensa-signal-bot"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# --- D1 database -----------------------------------------------------------
+# Create with: wrangler d1 create lensa-signal-bot-db
+# Then paste the returned database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "lensa-signal-bot-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+# --- Workflow: fits every strategy as its own step (see src/workflows) -----
+[[workflows]]
+name = "lensa-signal-fit"
+binding = "SIGNAL_FIT_WORKFLOW"
+class_name = "SignalFitWorkflow"
+
+# --- Cron trigger ------------------------------------------------------------
+# Phase 2: checks open signals against current price (TP/SL) every 10 min.
+# The `scheduled()` handler exists as a stub in src/index.js already; wire the
+# real check up in Phase 2 without needing to touch this file again.
+[triggers]
+crons = ["*/10 * * * *"]
+
+# --- Non-secret config -------------------------------------------------------
+# Your own numeric Telegram user id (get it from @userinfobot on Telegram).
+# On first contact with the bot, this id is auto-promoted to admin -- see
+# ensureBootstrapAdmin() in src/db.js. Not secret, but keep the repo private
+# anyway since it identifies your Telegram account.
+[vars]
+OWNER_TELEGRAM_ID = "REPLACE_WITH_YOUR_TELEGRAM_USER_ID"
+
+# --- Secrets (set with `wrangler secret put <NAME>`, not stored here) -------
+# TELEGRAM_BOT_TOKEN        -- from @BotFather
+# TELEGRAM_WEBHOOK_SECRET   -- random string you invent; verifies incoming
+#                              webhook calls really come from Telegram
