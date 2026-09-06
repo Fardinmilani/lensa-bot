@@ -9,8 +9,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "lensa-signal-bot-db"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
-
+database_id = "15cc9a34-4d71-4613-9165-669b28fa2282"
 # --- Workflow: fits every strategy as its own step (see src/workflows) -----
 [[workflows]]
 name = "lensa-signal-fit"
@@ -30,7 +29,7 @@ crons = ["*/10 * * * *"]
 # ensureBootstrapAdmin() in src/db.js. Not secret, but keep the repo private
 # anyway since it identifies your Telegram account.
 [vars]
-OWNER_TELEGRAM_ID = "REPLACE_WITH_YOUR_TELEGRAM_USER_ID"
+OWNER_TELEGRAM_ID = "1901197080"
 
 # --- Secrets (set with `wrangler secret put <NAME>`, not stored here) -------
 # TELEGRAM_BOT_TOKEN        -- from @BotFather
