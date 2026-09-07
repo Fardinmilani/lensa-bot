@@ -38,6 +38,57 @@ export async function sendMessage(env, chatId, text, extra = {}) {
   return res.ok;
 }
 
+export async function editMessage(env, chatId, messageId, text, extra = {}) {
+  const res = await fetch(apiUrl(env, "editMessageText"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+      ...extra,
+    }),
+  });
+  return res.ok;
+}
+
+/** Keep button-driven wizards in one message; fall back to a fresh message if editing is unavailable. */
+export async function sendOrEditMessage(env, chatId, messageId, text, extra = {}) {
+  if (messageId && await editMessage(env, chatId, messageId, text, extra)) return true;
+  return sendMessage(env, chatId, text, extra);
+}
+
+/** Send long, paragraph-oriented reports without hitting Telegram's 4096-char limit. */
+export async function sendLongMessage(env, chatId, text, finalExtra = {}) {
+  const max = 3800;
+  if (text.length <= max) return sendMessage(env, chatId, text, finalExtra);
+  const paragraphs = String(text).split("\n\n");
+  const chunks = [];
+  let current = "";
+  for (const paragraph of paragraphs) {
+    if (paragraph.length > max) {
+      if (current) { chunks.push(current); current = ""; }
+      for (let i = 0; i < paragraph.length; i += max) chunks.push(paragraph.slice(i, i + max));
+      continue;
+    }
+    const candidate = current ? `${current}\n\n${paragraph}` : paragraph;
+    if (candidate.length > max) {
+      chunks.push(current);
+      current = paragraph;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) chunks.push(current);
+  let ok = true;
+  for (let i = 0; i < chunks.length; i++) {
+    ok = (await sendMessage(env, chatId, chunks[i], i === chunks.length - 1 ? finalExtra : {})) && ok;
+  }
+  return ok;
+}
+
 export async function answerCallbackQuery(env, callbackQueryId, text, extra = {}) {
   const res = await fetch(apiUrl(env, "answerCallbackQuery"), {
     method: "POST",

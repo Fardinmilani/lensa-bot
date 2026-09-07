@@ -2,6 +2,7 @@
 // available exchange routes. It provides OHLC plus traded volume for up to
 // 1,500 candles per time-paged request.
 const KUCOIN_BASE = "https://api.kucoin.com";
+const BITGET_BASE = "https://api.bitget.com";
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 const COINGECKO_IDS = {
   BTC: "bitcoin",
@@ -29,6 +30,7 @@ const COINGECKO_IDS = {
 
 export const VALID_TIMEFRAMES = ["15m", "1h", "4h", "1d"];
 const KUCOIN_INTERVALS = { "15m": ["15min", 900], "1h": ["1hour", 3600], "4h": ["4hour", 14400], "1d": ["1day", 86400] };
+const BITGET_INTERVALS = { "15m": "15min", "1h": "1h", "4h": "4h", "1d": "1day" };
 
 /** "btc" / "BTC" / "btcusdt" -> "BTCUSDT". Leaves an already-quoted pair alone. */
 export function normalizeSymbol(input) {
@@ -129,6 +131,56 @@ async function fetchCoinGeckoCandles(symbol, timeframe, limit) {
   return candles;
 }
 
+async function fetchBitgetCandles(symbol, timeframe, limit) {
+  const granularity = BITGET_INTERVALS[timeframe];
+  const rows = [];
+  let remaining = limit;
+  let endTime = Date.now();
+
+  while (remaining > 0) {
+    const pageLimit = Math.min(200, remaining);
+    const url = `${BITGET_BASE}/api/v2/spot/market/history-candles?symbol=${encodeURIComponent(symbol)}&granularity=${granularity}&endTime=${Math.floor(endTime)}&limit=${pageLimit}`;
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    const body = await readJsonResponse(res, `کندل جایگزین ${symbol}`);
+    if (!res.ok || body?.code !== "00000" || !Array.isArray(body?.data)) {
+      const error = new MarketDataError(`منبع دوم بازار برای ${symbol} پاسخ معتبر نداد: ${body?.msg || body?.code || `HTTP ${res.status}`}`);
+      error.status = res.status;
+      throw error;
+    }
+    if (body.data.length === 0) break;
+    rows.push(...body.data);
+    remaining -= body.data.length;
+    const oldest = Math.min(...body.data.map((row) => Number(row[0])));
+    if (!Number.isFinite(oldest) || body.data.length < pageLimit) break;
+    endTime = oldest - 1;
+  }
+
+  const deduped = new Map();
+  for (const row of rows) deduped.set(Number(row[0]), row);
+  const candles = [...deduped.values()]
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .slice(-limit)
+    .map((row) => ({
+      time: Number(row[0]) / 1000,
+      open: Number(row[1]),
+      high: Number(row[2]),
+      low: Number(row[3]),
+      close: Number(row[4]),
+      volume: Number(row[5]),
+    }));
+  if (candles.length < Math.min(limit, 50)) throw new MarketDataError(`داده‌ی کافی برای ${symbol}/${timeframe} از منبع دوم برنگشت.`);
+  return candles;
+}
+
+async function fallbackCandles(symbol, timeframe, limit) {
+  try {
+    return await fetchBitgetCandles(symbol, timeframe, limit);
+  } catch (bitgetError) {
+    console.error("Bitget candle fallback failed", symbol, timeframe, bitgetError);
+    return fetchCoinGeckoCandles(symbol, timeframe, limit);
+  }
+}
+
 async function fetchCoinGeckoPrices(symbols) {
   const entries = await Promise.all(symbols.map(async (symbol) => [symbol, await coinGeckoIdForSymbol(symbol)]));
   const ids = [...new Set(entries.map(([, id]) => id))];
@@ -213,7 +265,7 @@ export async function fetchCandles(symbol, timeframe, limit = 300) {
     }));
   } catch (err) {
     if (err?.invalidJson || shouldUseFallback(err?.status) || err?.status == null) {
-      return fetchCoinGeckoCandles(symbol, timeframe, limit);
+      return fallbackCandles(symbol, timeframe, limit);
     }
     throw err;
   }
@@ -268,10 +320,18 @@ export async function fetchCurrentPrices(symbols) {
   }
   const out = {};
   const tickers = new Map(body.data.ticker.map((row) => [row.symbol, Number(row.last)]));
+  const missing = [];
   for (const symbol of unique) {
     const price = tickers.get(kucoinSymbol(symbol));
-    if (!Number.isFinite(price) || price <= 0) throw new MarketDataError(`قیمت ${symbol} برنگشت.`);
-    out[symbol] = price;
+    if (!Number.isFinite(price) || price <= 0) missing.push(symbol);
+    else out[symbol] = price;
+  }
+  if (missing.length) {
+    try {
+      Object.assign(out, await fetchCoinGeckoPrices(missing));
+    } catch (err) {
+      console.error("Could not resolve some market prices", missing, err);
+    }
   }
   return out;
 }

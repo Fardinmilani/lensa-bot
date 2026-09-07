@@ -205,6 +205,34 @@ test("createSignalRequest -> saveSignal -> getSignalById round-trip with real id
   assert.equal(req.status, "done");
 });
 
+test("interactive fit results persist through basis and strategy selection", async () => {
+  const env = freshEnv();
+  await db.getOrCreateUser(env, 555, "u");
+  const requestId = await db.createSignalRequest(env, {
+    userId: 555, symbol: "BTCUSDT", timeframe: "4h", leverage: 5, stopLossPercent: 10, takeProfitPercent: 50,
+  });
+  const results = [{ key: "emaCrossover", result: { totalReturnPercent: 12 }, params: { fast: 9, slow: 21 } }];
+  await db.saveSignalFitRun(env, { requestId, userId: 555, config: { symbol: "BTCUSDT" }, results });
+  assert.equal((await db.getSignalFitRun(env, requestId)).results[0].key, "emaCrossover");
+  assert.equal(await db.chooseSignalFitBasis(env, requestId, 555, "sharpe"), true);
+  assert.equal(await db.chooseSignalFitStrategy(env, requestId, 555, "emaCrossover"), true);
+  const selected = await db.getSignalFitRun(env, requestId);
+  assert.equal(selected.status, "finalizing");
+  assert.equal(selected.selected_basis, "sharpe");
+  assert.equal(selected.selected_strategy_key, "emaCrossover");
+});
+
+test("watchlist, alerts and journal persist per user", async () => {
+  const env = freshEnv();
+  await db.getOrCreateUser(env, 555, "u");
+  await db.addWatchlistSymbol(env, 555, "BTCUSDT", "1h");
+  assert.deepEqual((await db.listWatchlist(env, 555)).map((row) => [row.symbol, row.timeframe]), [["BTCUSDT", "1h"]]);
+  const alertId = await db.createPriceAlert(env, { userId: 555, symbol: "BTCUSDT", condition: "above", level: 100, lastPrice: 90 });
+  assert.equal((await db.listPriceAlerts(env, 555, { activeOnly: true }))[0].id, alertId);
+  const journalId = await db.addJournalEntry(env, { userId: 555, symbol: "BTCUSDT", note: "setup reviewed" });
+  assert.equal((await db.listJournalEntries(env, 555))[0].id, journalId);
+});
+
 test("getOpenSignals + resolveSignalsBatch closes multiple signals in one call", async () => {
   const env = freshEnv();
   await db.getOrCreateUser(env, 555, "u");

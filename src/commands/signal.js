@@ -1,261 +1,268 @@
-import { sendMessage, answerCallbackQuery } from "../telegram.js";
+import { sendMessage, sendOrEditMessage, answerCallbackQuery } from "../telegram.js";
 import * as db from "../db.js";
 import { normalizeSymbol, VALID_TIMEFRAMES } from "../marketData.js";
 import { mainMenuMarkup } from "./menu.js";
 
-const LEVERAGE_OPTIONS = [1, 2, 5, 10, 20];
 const SYMBOL_OPTIONS = [
-  ["₿ BTC", "BTCUSDT"],
-  ["Ξ ETH", "ETHUSDT"],
-  ["🟡 BNB", "BNBUSDT"],
-  ["◎ SOL", "SOLUSDT"],
-  ["✕ XRP", "XRPUSDT"],
-  ["🐕 DOGE", "DOGEUSDT"],
+  ["₿ BTC", "BTCUSDT"], ["Ξ ETH", "ETHUSDT"], ["🟡 BNB", "BNBUSDT"],
+  ["◎ SOL", "SOLUSDT"], ["✕ XRP", "XRPUSDT"], ["🐕 DOGE", "DOGEUSDT"],
 ];
-const STOP_LOSS_OPTIONS = [1, 2, 5, 10];
-const TAKE_PROFIT_OPTIONS = [2, 5, 10, 20, 50, 100];
 const BACKTEST_DAYS = {
-  "15m": [7, 14, 30],
-  "1h": [14, 30, 60, 90],
-  "4h": [60, 90],
-  "1d": [90, 180, 365],
+  "15m": [7, 14, 30], "1h": [14, 30, 60, 90], "4h": [30, 60, 90, 180], "1d": [90, 180, 365],
 };
 
-function symbolKeyboard() {
-  const rows = [];
-  for (let i = 0; i < SYMBOL_OPTIONS.length; i += 2) {
-    rows.push(
-      SYMBOL_OPTIONS.slice(i, i + 2).map(([text, symbol]) => ({ text, callback_data: `wz:symbol:${symbol}` }))
-    );
+function valueRows(values, prefix, label = String, perRow = 4) {
+  const result = [];
+  for (let i = 0; i < values.length; i += perRow) {
+    result.push(values.slice(i, i + perRow).map((value) => ({ text: label(value), callback_data: `${prefix}:${value}` })));
   }
-  rows.push([{ text: "⌨️ نماد دیگر", callback_data: "wz:customsymbol" }]);
-  rows.push([{ text: "↩️ منوی اصلی", callback_data: "menu:home" }]);
-  return { inline_keyboard: rows };
+  return result;
 }
 
-function timeframeKeyboard() {
-  return { inline_keyboard: [VALID_TIMEFRAMES.map((tf) => ({ text: tf, callback_data: `wz:tf:${tf}` }))] };
+function keyboard(buttonRows, { custom, skip, cancel = true } = {}) {
+  const result = [...buttonRows];
+  if (custom) result.push([{ text: `⌨️ ${custom.label}`, callback_data: custom.data }]);
+  if (skip) result.push([{ text: `⏭ ${skip.label}`, callback_data: skip.data }]);
+  if (cancel) result.push([{ text: "❌ لغو و بازگشت", callback_data: "menu:cancel" }]);
+  return { inline_keyboard: result };
 }
 
-function leverageKeyboard() {
-  return { inline_keyboard: [LEVERAGE_OPTIONS.map((lev) => ({ text: `${lev}x`, callback_data: `wz:lev:${lev}` }))] };
+function symbolKeyboard() {
+  const result = [];
+  for (let i = 0; i < SYMBOL_OPTIONS.length; i += 2) {
+    result.push(SYMBOL_OPTIONS.slice(i, i + 2).map(([text, symbol]) => ({ text, callback_data: `wz:symbol:${symbol}` })));
+  }
+  return keyboard(result, { custom: { label: "نماد دیگر", data: "wz:custom:symbol" } });
 }
 
-function stopLossKeyboard() {
-  return {
-    inline_keyboard: [
-      STOP_LOSS_OPTIONS.map((pct) => ({ text: `SL ${pct}٪`, callback_data: `wz:sl:${pct}` })),
-      [{ text: "⌨️ عدد دیگر", callback_data: "wz:customsl" }],
-      [{ text: "❌ لغو", callback_data: "menu:cancel" }],
-    ],
-  };
+async function setAndAsk(env, userId, step, data, chatId, text, replyMarkup, editMessageId = null) {
+  await db.setSession(env, userId, step, data);
+  return sendOrEditMessage(env, chatId, editMessageId, text, { reply_markup: replyMarkup });
 }
 
-function takeProfitKeyboard() {
-  return {
-    inline_keyboard: [
-      TAKE_PROFIT_OPTIONS.map((pct) => ({ text: `TP ${pct}٪`, callback_data: `wz:tp:${pct}` })),
-      [{ text: "⌨️ عدد دیگر", callback_data: "wz:customtp" }],
-      [{ text: "❌ لغو", callback_data: "menu:cancel" }],
-    ],
-  };
+async function askMarketType(env, message, data) {
+  return setAndAsk(env, message.from.id, "signal_market_type", data, message.chat.id,
+    "<b>نوع بازار</b>\n\nدر Spot فقط لانگ و بدون لیکویید داریم. در Futures جهت و لورج را هم جدا انتخاب می‌کنی.",
+    keyboard([[{ text: "🟢 Spot", callback_data: "wz:market:spot" }, { text: "⚡ Futures", callback_data: "wz:market:futures" }]]), message.editMessageId);
 }
 
-function backtestDaysKeyboard(timeframe) {
-  const options = BACKTEST_DAYS[timeframe] ?? [90, 180, 365];
-  return {
-    inline_keyboard: [
-      options.map((days) => ({ text: `${days} روز`, callback_data: `wz:days:${days}` })),
-      [{ text: "❌ لغو", callback_data: "menu:cancel" }],
-    ],
-  };
+async function askTimeframe(env, message, data) {
+  return setAndAsk(env, message.from.id, "signal_timeframe", data, message.chat.id,
+    "<b>تایم‌فریم</b>\n\nفاصله‌ی هر کندل را انتخاب کن:",
+    keyboard([VALID_TIMEFRAMES.map((tf) => ({ text: tf, callback_data: `wz:tf:${tf}` }))]), message.editMessageId);
 }
 
-/** Entry point for the /signal command. */
+async function askDays(env, message, data) {
+  const options = BACKTEST_DAYS[data.timeframe] ?? [30, 60, 90];
+  return setAndAsk(env, message.from.id, "signal_days", data, message.chat.id,
+    "<b>بازه‌ی فیت و بک‌تست</b>\n\nتمام استراتژی‌ها روی چند روز اخیر فیت و بک‌تست شوند؟",
+    keyboard(valueRows(options, "wz:days", (value) => `${value} روز`, 4)), message.editMessageId);
+}
+
+async function askDirection(env, message, data) {
+  return setAndAsk(env, message.from.id, "signal_direction", data, message.chat.id,
+    "<b>جهت Futures</b>\n\nمی‌توانی یک جهت را محدود کنی یا بررسی هر دو جهت را به ربات بسپاری.",
+    keyboard([[
+      { text: "↕️ هر دو", callback_data: "wz:dir:both" },
+      { text: "📈 Long", callback_data: "wz:dir:long" },
+      { text: "📉 Short", callback_data: "wz:dir:short" },
+    ]], { skip: { label: "پیش‌فرض: هر دو", data: "wz:dir:both" } }), message.editMessageId);
+}
+
+async function askLeverage(env, message, data) {
+  return setAndAsk(env, message.from.id, "signal_leverage", data, message.chat.id,
+    "<b>لورج</b>\n\nاگر انتخاب نکنی، مقدار محافظه‌کارانه‌ی 3x اعمال می‌شود.",
+    keyboard(valueRows([2, 3, 5, 10, 20], "wz:lev", (value) => `${value}x`, 5), {
+      custom: { label: "لورج دلخواه", data: "wz:custom:leverage" },
+      skip: { label: "انتخاب نمی‌کنم — 3x", data: "wz:lev:3" },
+    }), message.editMessageId);
+}
+
+async function askFee(env, message, data) {
+  return setAndAsk(env, message.from.id, "signal_fee", data, message.chat.id,
+    "<b>کارمزد</b>\n\nکارمزد هر سمت معامله را مشخص کن. اگر مطمئن نیستی، پیش‌فرض مناسب است.",
+    keyboard(valueRows([0.05, 0.1, 0.2, 0.5], "wz:fee", (value) => `${value}٪`, 4), {
+      custom: { label: "کارمزد دلخواه", data: "wz:custom:feePercent" },
+      skip: { label: "پیش‌فرض 0.1٪", data: "wz:fee:0.1" },
+    }), message.editMessageId);
+}
+
+async function askFill(env, message, data) {
+  return setAndAsk(env, message.from.id, "signal_fill", data, message.chat.id,
+    "<b>زمان اجرای معامله در بک‌تست</b>\n\n" +
+    "Close همان کندل خوش‌بینانه‌تر است. Next Open تأخیر اجرای واقعی را بهتر شبیه‌سازی می‌کند.",
+    keyboard([[
+      { text: "Close همان کندل", callback_data: "wz:fill:close" },
+      { text: "Next Open", callback_data: "wz:fill:nextOpen" },
+    ]], { skip: { label: "پیش‌فرض: Next Open", data: "wz:fill:nextOpen" } }), message.editMessageId);
+}
+
+async function askExitMode(env, message, data) {
+  return setAndAsk(env, message.from.id, "signal_exit_mode", data, message.chat.id,
+    "<b>روش محاسبه‌ی حدها</b>\n\n" +
+    "• ROI پوزیشن: درصد سود/زیان پوزیشن است و در Futures بر لورج تقسیم می‌شود.\n" +
+    "• ATR خودکار: حدها از نوسان واقعی بازار ساخته می‌شوند.",
+    keyboard([[
+      { text: "٪ ROI پوزیشن", callback_data: "wz:exit:roi" },
+      { text: "📐 ATR خودکار", callback_data: "wz:exit:atr" },
+    ]], { skip: { label: "انتخاب نمی‌کنم — ATR", data: "wz:exit:atr" } }), message.editMessageId);
+}
+
+async function askStopLoss(env, message, data) {
+  const example = data.marketType === "futures"
+    ? `\nمثال: 10٪ ROI با لورج ${data.leverage}x ≈ ${Number(10 / data.leverage).toFixed(2)}٪ حرکت خلاف قیمت.`
+    : "\nدر Spot درصد ROI با درصد حرکت قیمت یکسان است.";
+  return setAndAsk(env, message.from.id, "signal_stop_loss", data, message.chat.id,
+    `<b>حد ضرر · ROI پوزیشن</b>${example}`,
+    keyboard(valueRows([5, 10, 15, 20, 30], "wz:sl", (value) => `${value}٪`, 5), {
+      custom: { label: "حد ضرر دلخواه", data: "wz:custom:stopLossPercent" },
+      skip: { label: "پیش‌فرض 10٪", data: "wz:sl:10" },
+    }), message.editMessageId);
+}
+
+async function askTakeProfit(env, message, data) {
+  const example = data.marketType === "futures"
+    ? `\nمثال: 50٪ ROI با لورج ${data.leverage}x ≈ ${Number(50 / data.leverage).toFixed(2)}٪ حرکت موافق قیمت.`
+    : "";
+  return setAndAsk(env, message.from.id, "signal_take_profit", data, message.chat.id,
+    `<b>تارگت · ROI پوزیشن</b>${example}`,
+    keyboard(valueRows([10, 20, 30, 50, 100], "wz:tp", (value) => `${value}٪`, 5), {
+      custom: { label: "تارگت دلخواه", data: "wz:custom:takeProfitPercent" },
+      skip: { label: "پیش‌فرض 20٪", data: "wz:tp:20" },
+    }), message.editMessageId);
+}
+
+async function askAccountSize(env, message, data) {
+  return setAndAsk(env, message.from.id, "signal_account", data, message.chat.id,
+    "<b>اندازه‌ی پوزیشن</b>\n\nاندازه‌ی حساب را برای محاسبه‌ی حجم پوزیشن انتخاب کن. این بخش اختیاری است.",
+    keyboard(valueRows([1000, 5000, 10000, 25000], "wz:account", (value) => `${value.toLocaleString("en-US")} USDT`, 2), {
+      custom: { label: "سرمایه‌ی دلخواه", data: "wz:custom:accountSize" },
+      skip: { label: "حجم پوزیشن لازم نیست", data: "wz:account:0" },
+    }), message.editMessageId);
+}
+
+async function askRiskPercent(env, message, data) {
+  return setAndAsk(env, message.from.id, "signal_risk", data, message.chat.id,
+    "<b>ریسک هر معامله</b>\n\nچند درصد از کل حساب در صورت برخورد به حد ضرر از دست برود؟",
+    keyboard(valueRows([0.5, 1, 2, 3, 5], "wz:risk", (value) => `${value}٪`, 5), {
+      custom: { label: "درصد دلخواه", data: "wz:custom:riskPercent" },
+      skip: { label: "پیش‌فرض 1٪", data: "wz:risk:1" },
+    }), message.editMessageId);
+}
+
 export async function handleSignalStart(env, message) {
-  const chatId = message.chat.id;
-  const userId = message.from.id;
-  await db.getOrCreateUser(env, userId, message.from.username ?? null); // sessions.telegram_id FKs to users
-
+  const { id: userId, username } = message.from;
+  await db.getOrCreateUser(env, userId, username ?? null);
   const rate = await db.checkRateLimit(env, userId);
   if (!rate.allowed) {
-    const why =
-      rate.reason === "daily_limit"
-        ? `سقف روزانه‌ت (${rate.limit} تا) پر شده.`
-        : `هم‌زمان بیشتر از ${rate.limit} سیگنال باز نمی‌تونی داشته باشی -- منتظر بسته‌شدن یکی‌شون بمون.`;
-    return sendMessage(env, chatId, `⛔ ${why}`);
+    const why = rate.reason === "daily_limit" ? `سقف روزانه‌ات (${rate.limit}) پر شده.` : `بیشتر از ${rate.limit} سیگنال باز هم‌زمان نمی‌توانی داشته باشی.`;
+    return sendMessage(env, message.chat.id, `⛔ ${why}`, mainMenuMarkup(await db.isAdmin(env, userId)));
   }
-
-  await db.setSession(env, userId, "symbol", {});
-  return sendMessage(env, chatId, "رمزارز را انتخاب کن:", { reply_markup: symbolKeyboard() });
+  return setAndAsk(env, userId, "signal_symbol", {}, message.chat.id,
+    "<b>سیگنال حرفه‌ای Lensa</b>\n\nاول بازار را انتخاب می‌کنیم، بعد همه‌ی استراتژی‌ها واقعاً فیت می‌شوند و خودت معیار و استراتژی نهایی را انتخاب می‌کنی.\n\nرمزارز را انتخاب کن:", symbolKeyboard(), message.editMessageId);
 }
 
-/** Routed here for any text message while the user has an active wizard session. */
+async function afterValue(env, message, session, field, value) {
+  const data = { ...session.data, [field]: value };
+  if (field === "symbol") return askMarketType(env, message, data);
+  if (field === "marketType") return askTimeframe(env, message, data);
+  if (field === "timeframe") return askDays(env, message, data);
+  if (field === "backtestDays") return data.marketType === "spot"
+    ? askFee(env, message, { ...data, direction: "long", leverage: 1 })
+    : askDirection(env, message, data);
+  if (field === "direction") return askLeverage(env, message, data);
+  if (field === "leverage") return askFee(env, message, data);
+  if (field === "feePercent") return askFill(env, message, data);
+  if (field === "fillTiming") return askExitMode(env, message, data);
+  if (field === "exitMode") return value === "atr"
+    ? askAccountSize(env, message, { ...data, stopLossPercent: 0, takeProfitPercent: 0 })
+    : askStopLoss(env, message, data);
+  if (field === "stopLossPercent") return askTakeProfit(env, message, data);
+  if (field === "takeProfitPercent") return askAccountSize(env, message, data);
+  if (field === "accountSize") return Number(value) <= 0
+    ? startFit(env, message, { ...data, riskPercent: 0 })
+    : askRiskPercent(env, message, data);
+  if (field === "riskPercent") return startFit(env, message, data);
+}
+
+function customRule(field) {
+  return {
+    symbol: { prompt: "نماد را بفرست؛ مثلاً BTC یا ETH." },
+    leverage: { min: 1, max: 125, prompt: "لورج را بین 1 تا 125 بفرست." },
+    feePercent: { min: 0, max: 5, prompt: "کارمزد هر سمت را بین 0 تا 5 درصد بفرست." },
+    stopLossPercent: { min: 0.1, max: 95, prompt: "حد ضرر ROI را بین 0.1 تا 95 درصد بفرست تا قیمت حد ضرر معتبر بماند." },
+    takeProfitPercent: { min: 0.1, max: 1000, prompt: "تارگت ROI را بین 0.1 تا 1000 درصد بفرست." },
+    accountSize: { min: 1, max: 1e12, prompt: "اندازه‌ی حساب را به USDT بفرست." },
+    riskPercent: { min: 0.01, max: 100, prompt: "درصد ریسک حساب را بین 0.01 تا 100 بفرست." },
+  }[field];
+}
+
 export async function handleWizardText(env, message, session) {
-  const chatId = message.chat.id;
-  const userId = message.from.id;
-  const text = (message.text ?? "").trim();
-
-  if (text === "/cancel") {
-    return handleCancel(env, message);
+  if ((message.text ?? "").trim() === "/cancel") return handleCancel(env, message);
+  if (session.step !== "signal_custom") return sendMessage(env, message.chat.id, "در این مرحله از دکمه‌ها استفاده کن یا عملیات را لغو کن.");
+  const field = session.data.pendingField;
+  const rule = customRule(field);
+  if (!rule) return handleCancel(env, message);
+  let value;
+  if (field === "symbol") {
+    value = normalizeSymbol(message.text);
+    if (!/^[A-Z0-9]{5,20}$/.test(value)) return sendMessage(env, message.chat.id, "نماد معتبر نیست؛ مثلاً BTC یا ETH بفرست.");
+  } else {
+    value = Number(String(message.text || "").replace(/[^\d.]/g, ""));
+    if (!Number.isFinite(value) || value < rule.min || value > rule.max) return sendMessage(env, message.chat.id, rule.prompt);
   }
-
-  if (session.step === "symbol") {
-    const symbol = normalizeSymbol(text);
-    if (!/^[A-Z0-9]{5,15}$/.test(symbol)) {
-      return sendMessage(env, chatId, "این نماد معتبر به نظر نمی‌رسه. یه چیزی مثل BTC یا ETH بفرست.");
-    }
-    await db.setSession(env, userId, "timeframe", { ...session.data, symbol });
-    return sendMessage(env, chatId, "تایم‌فریم رو انتخاب کن:", { reply_markup: timeframeKeyboard() });
-  }
-
-  if (session.step === "symbol_custom") {
-    const symbol = normalizeSymbol(text);
-    if (!/^[A-Z0-9]{5,15}$/.test(symbol)) {
-      return sendMessage(env, chatId, "این نماد معتبر به نظر نمی‌رسه. مثلاً BTC یا ETH بفرست.");
-    }
-    await db.setSession(env, userId, "timeframe", { ...session.data, symbol });
-    return sendMessage(env, chatId, "تایم‌فریم را انتخاب کن:", { reply_markup: timeframeKeyboard() });
-  }
-
-  if (session.step === "stop_loss") {
-    const pct = Number(text.replace(/[^\d.]/g, ""));
-    if (!Number.isFinite(pct) || pct <= 0 || pct > 50) {
-      return sendMessage(env, chatId, "فقط یه عدد بین ۰ تا ۵۰ بفرست (درصد حد ضرر)، مثلاً 2");
-    }
-    await db.setSession(env, userId, "take_profit", { ...session.data, stopLossPercent: pct });
-    return sendMessage(env, chatId, "درصد حد سود را انتخاب کن:", { reply_markup: takeProfitKeyboard() });
-  }
-
-  if (session.step === "stop_loss_custom") {
-    const pct = Number(text.replace(/[^\d.]/g, ""));
-    if (!Number.isFinite(pct) || pct <= 0 || pct > 50) {
-      return sendMessage(env, chatId, "فقط یک عدد بین ۰ تا ۵۰ بفرست.");
-    }
-    await db.setSession(env, userId, "take_profit", { ...session.data, stopLossPercent: pct });
-    return sendMessage(env, chatId, "درصد حد سود را انتخاب کن:", { reply_markup: takeProfitKeyboard() });
-  }
-
-  if (session.step === "take_profit") {
-    const pct = Number(text.replace(/[^\d.]/g, ""));
-    if (!Number.isFinite(pct) || pct <= 0 || pct > 200) {
-      return sendMessage(env, chatId, "درصد حد سود را انتخاب کن یا عدد دیگری بفرست:", { reply_markup: takeProfitKeyboard() });
-    }
-    return askBacktestDays(env, message, { ...session.data, takeProfitPercent: pct });
-  }
-
-  if (session.step === "take_profit_custom") {
-    const pct = Number(text.replace(/[^\d.]/g, ""));
-    if (!Number.isFinite(pct) || pct <= 0 || pct > 200) {
-      return sendMessage(env, chatId, "فقط یک عدد معتبر بین ۰ تا ۲۰۰ بفرست.");
-    }
-    return askBacktestDays(env, message, { ...session.data, takeProfitPercent: pct });
-  }
-
-  // Button-only steps expect a tap, not free text.
-  return sendMessage(env, chatId, "لطفاً از دکمه‌های بالا انتخاب کن، یا /cancel بزن.");
+  const data = { ...session.data };
+  delete data.pendingField;
+  return afterValue(env, message, { ...session, data }, field, value);
 }
 
-/** Routed here for callback_query taps (inline keyboard buttons) while a wizard session is active. */
 export async function handleWizardCallback(env, callbackQuery, session) {
-  const chatId = callbackQuery.message.chat.id;
-  const userId = callbackQuery.from.id;
+  const message = { chat: callbackQuery.message.chat, from: callbackQuery.from, editMessageId: callbackQuery.message.message_id };
   const [, kind, value] = callbackQuery.data.split(":");
-
-  if (kind === "symbol" && session.step === "symbol") {
-    await db.setSession(env, userId, "timeframe", { ...session.data, symbol: value });
+  if (kind === "custom") {
+    const rule = customRule(value);
+    if (!rule) return answerCallbackQuery(env, callbackQuery.id, "گزینه معتبر نیست.");
+    await db.setSession(env, callbackQuery.from.id, "signal_custom", { ...session.data, pendingField: value });
     await answerCallbackQuery(env, callbackQuery.id);
-    return sendMessage(env, chatId, "تایم‌فریم را انتخاب کن:", { reply_markup: timeframeKeyboard() });
+    return sendMessage(env, message.chat.id, `${rule.prompt}\n\nبرای لغو، /cancel را بفرست.`);
   }
-
-  if (kind === "customsymbol" && session.step === "symbol") {
-    await db.setSession(env, userId, "symbol_custom", session.data);
-    await answerCallbackQuery(env, callbackQuery.id);
-    return sendMessage(env, chatId, "نماد را بفرست (مثلاً BTC یا ETH):");
-  }
-
-  if (kind === "tf" && session.step === "timeframe") {
-    await db.setSession(env, userId, "leverage", { ...session.data, timeframe: value });
-    await answerCallbackQuery(env, callbackQuery.id);
-    return sendMessage(env, chatId, "لورج رو انتخاب کن:", { reply_markup: leverageKeyboard() });
-  }
-
-  if (kind === "lev" && session.step === "leverage") {
-    await db.setSession(env, userId, "stop_loss", { ...session.data, leverage: Number(value) });
-    await answerCallbackQuery(env, callbackQuery.id);
-    return sendMessage(env, chatId, "درصد حد ضرر را انتخاب کن:", { reply_markup: stopLossKeyboard() });
-  }
-
-  if (kind === "sl" && session.step === "stop_loss") {
-    await db.setSession(env, userId, "take_profit", { ...session.data, stopLossPercent: Number(value) });
-    await answerCallbackQuery(env, callbackQuery.id);
-    return sendMessage(env, chatId, "درصد حد سود را انتخاب کن:", { reply_markup: takeProfitKeyboard() });
-  }
-
-  if (kind === "customsl" && session.step === "stop_loss") {
-    await db.setSession(env, userId, "stop_loss_custom", session.data);
-    await answerCallbackQuery(env, callbackQuery.id);
-    return sendMessage(env, chatId, "درصد حد ضرر را بفرست (عدد بین ۰ تا ۵۰):");
-  }
-
-  if (kind === "tp" && session.step === "take_profit") {
-    await answerCallbackQuery(env, callbackQuery.id);
-    return askBacktestDays(env, { chat: { id: chatId }, from: { id: userId } }, { ...session.data, takeProfitPercent: Number(value) });
-  }
-
-  if (kind === "customtp" && session.step === "take_profit") {
-    await db.setSession(env, userId, "take_profit_custom", session.data);
-    await answerCallbackQuery(env, callbackQuery.id);
-    return sendMessage(env, chatId, "درصد حد سود را بفرست (عدد بین ۰ تا ۲۰۰):");
-  }
-
-  if (kind === "days" && session.step === "backtest_days") {
-    const allowedDays = BACKTEST_DAYS[session.data.timeframe] ?? [];
-    if (!allowedDays.includes(Number(value))) {
-      return answerCallbackQuery(env, callbackQuery.id, "این انتخاب دیگر معتبر نیست.");
-    }
-    await answerCallbackQuery(env, callbackQuery.id);
-    return finishWizard(env, { chat: { id: chatId }, from: { id: userId } }, { ...session.data, backtestDays: Number(value) });
-  }
-
-  // Tap on a stale keyboard from an earlier, already-passed step.
-  return answerCallbackQuery(env, callbackQuery.id, "این دکمه دیگه معتبر نیست.");
+  const expected = {
+    symbol: "signal_symbol", market: "signal_market_type", tf: "signal_timeframe", days: "signal_days",
+    dir: "signal_direction", lev: "signal_leverage", fee: "signal_fee", fill: "signal_fill",
+    exit: "signal_exit_mode", sl: "signal_stop_loss", tp: "signal_take_profit", account: "signal_account", risk: "signal_risk",
+  }[kind];
+  if (!expected || session.step !== expected) return answerCallbackQuery(env, callbackQuery.id, "این دکمه دیگر مربوط به مرحله‌ی فعلی نیست.");
+  await answerCallbackQuery(env, callbackQuery.id);
+  const field = {
+    symbol: "symbol", market: "marketType", tf: "timeframe", days: "backtestDays", dir: "direction",
+    lev: "leverage", fee: "feePercent", fill: "fillTiming", exit: "exitMode", sl: "stopLossPercent",
+    tp: "takeProfitPercent", account: "accountSize", risk: "riskPercent",
+  }[kind];
+  const numeric = new Set(["backtestDays", "leverage", "feePercent", "stopLossPercent", "takeProfitPercent", "accountSize", "riskPercent"]);
+  return afterValue(env, message, session, field, numeric.has(field) ? Number(value) : value);
 }
 
-async function finishWizard(env, message, data) {
-  const chatId = message.chat.id;
-  const userId = message.from.id;
-  await db.clearSession(env, userId);
-
+async function startFit(env, message, data) {
+  await db.clearSession(env, message.from.id);
   const requestId = await db.createSignalRequest(env, {
-    userId,
+    userId: message.from.id,
     symbol: data.symbol,
     timeframe: data.timeframe,
     leverage: data.leverage,
     stopLossPercent: data.stopLossPercent,
     takeProfitPercent: data.takeProfitPercent,
   });
-
-  await sendMessage(
-    env,
-    chatId,
-    `⏳ در حال فیت کردن همه‌ی استراتژی‌ها روی ${data.symbol} (${data.timeframe})... چند ثانیه طول می‌کشه.`
+  const market = data.marketType === "spot" ? "Spot" : `Futures ${data.leverage}x`;
+  const exits = data.exitMode === "atr" ? "ATR خودکار" : `SL ${data.stopLossPercent}٪ / TP ${data.takeProfitPercent}٪ ROI`;
+  await sendOrEditMessage(env, message.chat.id, message.editMessageId,
+    `<b>فیت شروع شد</b> ⏳\n\n${data.symbol} · ${market}\n${data.timeframe} · ${data.backtestDays} روز · جهت ${data.direction}\n` +
+    `Fee ${data.feePercent}٪ · Fill ${data.fillTiming}\nحدها: ${exits}\n\n` +
+    "بعد از پایان، اطلاعات همه‌ی استراتژی‌ها در چند پیام خوانا می‌آید. سپس معیار رتبه‌بندی و خود استراتژی را انتخاب می‌کنی."
   );
-
-  await env.SIGNAL_FIT_WORKFLOW.create({
-    params: { requestId, userId, chatId, ...data },
-  });
-}
-
-async function askBacktestDays(env, message, data) {
-  await db.setSession(env, message.from.id, "backtest_days", data);
-  return sendMessage(env, message.chat.id, "بک‌تست روی چند روز اخیر انجام شود؟", {
-    reply_markup: backtestDaysKeyboard(data.timeframe),
-  });
+  await env.SIGNAL_FIT_WORKFLOW.create({ params: { operation: "fit", requestId, userId: message.from.id, chatId: message.chat.id, ...data } });
 }
 
 export async function handleCancel(env, message) {
   await db.clearSession(env, message.from.id);
-  const isAdmin = await db.isAdmin(env, message.from.id);
-  return sendMessage(env, message.chat.id, "لغو شد. از منوی زیر انتخاب کن:", mainMenuMarkup(isAdmin));
+  return sendMessage(env, message.chat.id, "عملیات لغو شد. از منوی زیر انتخاب کن:", mainMenuMarkup(await db.isAdmin(env, message.from.id)));
 }

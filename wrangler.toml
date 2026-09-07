@@ -17,9 +17,7 @@ binding = "SIGNAL_FIT_WORKFLOW"
 class_name = "SignalFitWorkflow"
 
 # --- Cron trigger ------------------------------------------------------------
-# Phase 2: checks open signals against current price (TP/SL) every 10 min.
-# The `scheduled()` handler exists as a stub in src/index.js already; wire the
-# real check up in Phase 2 without needing to touch this file again.
+# Checks open signals (TP/SL) and user price alerts every 10 minutes.
 [triggers]
 crons = ["*/10 * * * *"]
 

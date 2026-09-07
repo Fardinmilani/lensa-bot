@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createD1Shim } from "./d1-shim.mjs";
 import worker from "../src/index.js";
+import * as db from "../src/db.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const schema = readFileSync(join(__dirname, "..", "schema.sql"), "utf8");
@@ -183,7 +184,7 @@ test("/admin exposes button flows for adding admins and changing plans", async (
     ctx = makeCtx();
     await worker.fetch(webhookRequest(makeCallback("adm:addlist:0")), env, ctx);
     await ctx.settle();
-    const addPicker = tg.calls.find((call) => call.url.includes("/sendMessage"));
+    const addPicker = tg.calls.find((call) => call.url.includes("/editMessageText"));
     assert.ok(addPicker.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "adm:addpick:222"));
 
     tg.calls.length = 0;
@@ -196,14 +197,14 @@ test("/admin exposes button flows for adding admins and changing plans", async (
     ctx = makeCtx();
     await worker.fetch(webhookRequest(makeCallback("adm:planlist:0")), env, ctx);
     await ctx.settle();
-    const planPicker = tg.calls.find((call) => call.url.includes("/sendMessage"));
+    const planPicker = tg.calls.find((call) => call.url.includes("/editMessageText"));
     assert.ok(planPicker.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "adm:planuser:333"));
 
     tg.calls.length = 0;
     ctx = makeCtx();
     await worker.fetch(webhookRequest(makeCallback("adm:planuser:333")), env, ctx);
     await ctx.settle();
-    const planButtons = tg.calls.find((call) => call.url.includes("/sendMessage"));
+    const planButtons = tg.calls.find((call) => call.url.includes("/editMessageText"));
     assert.ok(planButtons.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "adm:planpick:333:unlimited"));
 
     ctx = makeCtx();
@@ -211,6 +212,33 @@ test("/admin exposes button flows for adding admins and changing plans", async (
     await ctx.settle();
     const user = await env.DB.prepare("SELECT plan_id FROM users WHERE telegram_id = 333").first();
     assert.equal(user.plan_id, 2);
+  } finally {
+    tg.restore();
+  }
+});
+
+test("admin can add a user manually even when the known-user picker is empty", async () => {
+  const env = freshEnv();
+  const tg = mockTelegramFetch();
+  try {
+    let ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeMessage("/start", { id: 999 })), env, ctx);
+    await ctx.settle();
+
+    tg.calls.length = 0;
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback("adm:addlist:0")), env, ctx);
+    await ctx.settle();
+    const picker = tg.calls.find((call) => call.url.includes("/editMessageText"));
+    assert.ok(picker.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "adm:addmanual"));
+
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback("adm:addmanual")), env, ctx);
+    await ctx.settle();
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeMessage("444 @manual_user", { id: 999 })), env, ctx);
+    await ctx.settle();
+    assert.equal(await dbIsAdmin(env, 444), true);
   } finally {
     tg.restore();
   }
@@ -236,20 +264,91 @@ test("signal wizard is button-driven and asks for the backtest window", async ()
     await tap("menu:signal");
     assert.ok(tg.calls.some((call) => call.body?.reply_markup?.inline_keyboard.flat().some((button) => button.callback_data === "wz:symbol:BTCUSDT")));
     await tap("wz:symbol:BTCUSDT");
+    await tap("wz:market:futures");
     await tap("wz:tf:1d");
-    await tap("wz:lev:5");
-    await tap("wz:sl:2");
-    await tap("wz:tp:5");
-
     const daysPrompt = tg.calls.at(-1);
     assert.ok(daysPrompt.body.text.includes("چند روز اخیر"));
     assert.ok(daysPrompt.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "wz:days:365"));
-
     await tap("wz:days:365");
+    await tap("wz:dir:both");
+    await tap("wz:lev:5");
+    await tap("wz:fee:0.1");
+    await tap("wz:fill:nextOpen");
+    await tap("wz:exit:roi");
+    await tap("wz:sl:10");
+    await tap("wz:tp:50");
+    await tap("wz:account:0");
     assert.equal(workflowCalls.length, 1);
+    assert.equal(workflowCalls[0].params.operation, "fit");
     assert.equal(workflowCalls[0].params.symbol, "BTCUSDT");
     assert.equal(workflowCalls[0].params.timeframe, "1d");
     assert.equal(workflowCalls[0].params.backtestDays, 365);
+    assert.equal(workflowCalls[0].params.marketType, "futures");
+    assert.equal(workflowCalls[0].params.leverage, 5);
+  } finally {
+    tg.restore();
+  }
+});
+
+test("fitted strategies are ranked by the user's criterion and finalized only after strategy selection", async () => {
+  const env = freshEnv();
+  const workflowCalls = [];
+  env.SIGNAL_FIT_WORKFLOW = { create: async (input) => workflowCalls.push(input) };
+  const tg = mockTelegramFetch();
+  try {
+    await db.getOrCreateUser(env, 999, "fardin");
+    const requestId = await db.createSignalRequest(env, {
+      userId: 999, symbol: "BTCUSDT", timeframe: "4h", leverage: 5, stopLossPercent: 10, takeProfitPercent: 50,
+    });
+    const base = { category: "trend", params: { period: 10 }, fit: { testedCount: 9, improved: true } };
+    await db.saveSignalFitRun(env, {
+      requestId,
+      userId: 999,
+      config: { requestId, userId: 999, chatId: 999, symbol: "BTCUSDT", timeframe: "4h", marketType: "futures", leverage: 5 },
+      results: [
+        { ...base, key: "smaCrossover", label: { fa: "استراتژی بازده" }, result: { totalReturnPercent: 40, sharpe: 0.5, winRate: 45, maxDrawdownPercent: 20, profitFactor: 1.2 } },
+        { ...base, key: "emaCrossover", label: { fa: "استراتژی شارپ" }, result: { totalReturnPercent: 20, sharpe: 1.8, winRate: 60, maxDrawdownPercent: 8, profitFactor: 1.8 } },
+      ],
+    });
+
+    let ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback(`fit:basis:${requestId}:sharpe`)), env, ctx);
+    await ctx.settle();
+    const ranking = tg.calls.find((call) => call.url.includes("editMessageText") || call.url.includes("sendMessage"));
+    const buttons = ranking.body.reply_markup.inline_keyboard.flat();
+    assert.match(buttons[0].text, /استراتژی شارپ/);
+
+    tg.calls.length = 0;
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback(`fit:strategy:${requestId}:emaCrossover`)), env, ctx);
+    await ctx.settle();
+    assert.equal(workflowCalls.length, 1);
+    assert.equal(workflowCalls[0].params.operation, "finalize");
+    assert.equal(workflowCalls[0].params.strategyKey, "emaCrossover");
+  } finally {
+    tg.restore();
+  }
+});
+
+test("signal detail buttons cannot expose another user's signal", async () => {
+  const env = freshEnv();
+  const tg = mockTelegramFetch();
+  try {
+    await db.getOrCreateUser(env, 999, "owner");
+    const requestId = await db.createSignalRequest(env, {
+      userId: 999, symbol: "BTCUSDT", timeframe: "4h", leverage: 1, stopLossPercent: 5, takeProfitPercent: 10,
+    });
+    const signalId = await db.saveSignal(env, {
+      requestId, userId: 999, symbol: "BTCUSDT", timeframe: "4h", leverage: 1,
+      strategyKey: "emaCrossover", strategyLabel: "EMA", direction: "long",
+      entryPrice: 100, stopLossPrice: 95, takeProfitPrice: 110,
+    });
+    const ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback(`detail:${signalId}`, { id: 222 })), env, ctx);
+    await ctx.settle();
+    const sent = tg.calls.find((call) => call.url.includes("sendMessage"));
+    assert.match(sent.body.text, /پیدا نشد/);
+    assert.doesNotMatch(sent.body.text, /جزئیات/);
   } finally {
     tg.restore();
   }

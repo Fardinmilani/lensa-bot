@@ -78,16 +78,17 @@ test("fetchCandles turns an HTML/upstream response into a readable MarketDataErr
   }
 });
 
-test("fetchCandles falls back to CoinGecko when KuCoin is geo-blocked", async () => {
+test("fetchCandles falls back to Bitget when KuCoin is geo-blocked", async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async (url) => {
     const u = String(url);
     if (u.includes("api.kucoin.com")) return new Response("<!DOCTYPE html>blocked", { status: 403 });
-    if (u.includes("api.coingecko.com/api/v3/coins/bitcoin/market_chart")) {
-      return new Response(JSON.stringify({
-        prices: [[1735689600000, 100], [1735776000000, 110], [1735862400000, 105]],
-        total_volumes: [[1735689600000, 10], [1735776000000, 11], [1735862400000, 12]],
-      }), { status: 200 });
+    if (u.includes("api.bitget.com")) {
+      return new Response(JSON.stringify({ code: "00000", data: [
+        ["1735689600000", "100", "112", "99", "110", "10"],
+        ["1735776000000", "110", "111", "103", "105", "11"],
+        ["1735862400000", "105", "108", "102", "107", "12"],
+      ] }), { status: 200 });
     }
     throw new Error(`unexpected fetch: ${u}`);
   };
@@ -95,7 +96,7 @@ test("fetchCandles falls back to CoinGecko when KuCoin is geo-blocked", async ()
     const candles = await fetchCandles("BTCUSDT", "1d", 3);
     assert.equal(candles.length, 3);
     assert.equal(candles[0].open, 100);
-    assert.equal(candles[1].close, 110);
+    assert.equal(candles[1].close, 105);
     assert.equal(candles[2].volume, 12);
   } finally {
     globalThis.fetch = original;
@@ -107,6 +108,7 @@ test("fetchCandles falls back when KuCoin returns HTML with HTTP 200", async () 
   globalThis.fetch = async (url) => {
     const u = String(url);
     if (u.includes("api.kucoin.com")) return new Response("<!DOCTYPE html>challenge", { status: 200 });
+    if (u.includes("api.bitget.com")) return new Response(JSON.stringify({ code: "40017", msg: "blocked" }), { status: 503 });
     if (u.includes("api.coingecko.com/api/v3/coins/bitcoin/market_chart")) {
       return new Response(JSON.stringify({
         prices: [[1735689600000, 100], [1735776000000, 101], [1735862400000, 102]],

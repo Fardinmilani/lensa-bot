@@ -13,26 +13,36 @@ import {
   handleAdminUserListCallback,
   handleAdminRemoveCallback,
   handleAdminAddCallback,
+  handleAdminAddManualStart,
+  handleAdminSessionText,
   handleAdminPlanUserCallback,
   handleAdminPlanPickCallback,
 } from "./commands/admin.js";
 import { handleSignalStart, handleWizardText, handleWizardCallback, handleCancel } from "./commands/signal.js";
 import { mainMenuMarkup } from "./commands/menu.js";
+import { handleFitCallback } from "./commands/signalSelection.js";
+import { handleAnalysisCallback, handleAnalysisFeatureStart, handleAnalysisHub, handleAnalysisText } from "./commands/analysis.js";
+import { handleAutomationCallback, handleAutomationHub, handleAutomationText } from "./commands/automation.js";
 import { formatDetailMessage } from "./signalFormat.js";
 import { checkOpenSignals } from "./cron/checkOpenSignals.js";
+import { checkPriceAlerts } from "./cron/checkPriceAlerts.js";
+import { handleNews } from "./commands/news.js";
+import { handleAbout } from "./commands/about.js";
 
 export { SignalFitWorkflow } from "./workflows/signalFitWorkflow.js";
 
 const HELP_TEXT =
-  "دستورهای عمومی:\n" +
-  "/start ، /myplan ، /plans\n" +
-  "/signal — سیگنال جدید (فیت همه‌ی استراتژی‌ها + تصمیم long/short)\n" +
-  "/cancel — لغو کردن ویزارد /signal در حال انجام\n\n" +
-  "دستورهای ادمین:\n" +
-  "/addadmin ، /removeadmin ، /listadmins\n" +
-  "/setplan TELEGRAM_ID PLAN_NAME\n" +
-  "/stats\n" +
-  "/admin — مدیریت ادمین با دکمه‌ها";
+  "<b>راهنمای Lensa</b>\n\n" +
+  "همه‌ی جریان‌های اصلی از منوی دکمه‌ای در دسترس‌اند؛ لازم نیست دستوری حفظ کنی.\n\n" +
+  "<b>تحلیل و معامله</b>\n" +
+  "/signal — فیت همه‌ی استراتژی‌ها و انتخاب دستی نتیجه\n" +
+  "/market · /decision · /forecast · /backtest · /risk · /news\n\n" +
+  "<b>پیگیری و حساب</b>\n" +
+  "/automation — Watchlist، هشدار، ژورنال و تاریخچه\n" +
+  "/myplan · /plans · /about · /cancel\n\n" +
+  "<b>مدیریت</b>\n" +
+  "/admin — پنل دکمه‌ای ادمین\n" +
+  "دستورهای متنی قدیمی add/remove admin و setplan هم برای سازگاری فعال مانده‌اند.";
 
 /** "/addadmin@MyBot 123 alice" -> { command: "addadmin", args: ["123", "alice"] } */
 function parseCommand(text) {
@@ -47,6 +57,14 @@ const PUBLIC_COMMANDS = {
   plans: handleListPlans,
   help: async (env, message) => sendMessage(env, message.chat.id, HELP_TEXT, mainMenuMarkup(await db.isAdmin(env, message.from.id))),
   signal: handleSignalStart,
+  market: (env, message) => handleAnalysisFeatureStart(env, message, "market"),
+  decision: (env, message) => handleAnalysisFeatureStart(env, message, "decision"),
+  forecast: (env, message) => handleAnalysisFeatureStart(env, message, "forecast"),
+  backtest: (env, message) => handleAnalysisFeatureStart(env, message, "backtest"),
+  risk: handleAnalysisHub,
+  automation: handleAutomationHub,
+  news: handleNews,
+  about: handleAbout,
   cancel: handleCancel,
 };
 
@@ -66,10 +84,32 @@ async function routeMessage(env, message) {
   // their very first /start response as well.
   await db.ensureBootstrapAdmin(env, userId, message.from.username ?? null);
 
+  if ((message.text ?? "").trim().split("@")[0] === "/cancel") {
+    await handleCancel(env, message);
+    return;
+  }
+
   // An in-progress /signal wizard owns the next text message (except
   // /cancel, which handleWizardText itself handles).
   const session = await db.getSession(env, userId);
   if (session) {
+    if (session.step.startsWith("admin_")) {
+      if (!(await db.isAdmin(env, userId))) {
+        await db.clearSession(env, userId);
+        await sendMessage(env, message.chat.id, "این عملیات فقط برای ادمین‌هاست.");
+        return;
+      }
+      await handleAdminSessionText(env, message, session);
+      return;
+    }
+    if (session.step.startsWith("analysis_")) {
+      await handleAnalysisText(env, message, session);
+      return;
+    }
+    if (session.step.startsWith("auto_")) {
+      await handleAutomationText(env, message, session);
+      return;
+    }
     await handleWizardText(env, message, session);
     return;
   }
@@ -99,6 +139,21 @@ async function routeMessage(env, message) {
 async function routeCallbackQuery(env, callbackQuery) {
   const data = callbackQuery.data ?? "";
 
+  if (data.startsWith("fit:")) {
+    await handleFitCallback(env, callbackQuery);
+    return;
+  }
+
+  if (data.startsWith("ana:")) {
+    await handleAnalysisCallback(env, callbackQuery);
+    return;
+  }
+
+  if (data.startsWith("auto:")) {
+    await handleAutomationCallback(env, callbackQuery);
+    return;
+  }
+
   if (data.startsWith("menu:")) {
     const action = data.split(":")[1];
     if (action === "admin" && !(await db.isAdmin(env, callbackQuery.from.id))) {
@@ -106,7 +161,7 @@ async function routeCallbackQuery(env, callbackQuery) {
       return;
     }
     await answerCallbackQuery(env, callbackQuery.id);
-    const message = { chat: callbackQuery.message.chat, from: callbackQuery.from };
+    const message = { chat: callbackQuery.message.chat, from: callbackQuery.from, editMessageId: callbackQuery.message.message_id };
     // A navigation button exits any half-finished signal wizard. Starting a
     // fresh signal replaces the session itself; cancel has its own message.
     if (action !== "signal" && action !== "cancel") {
@@ -114,6 +169,14 @@ async function routeCallbackQuery(env, callbackQuery) {
     }
     if (action === "home") await handleStart(env, message);
     else if (action === "signal") await handleSignalStart(env, message);
+    else if (action === "market") await handleAnalysisFeatureStart(env, message, "market");
+    else if (action === "decision") await handleAnalysisFeatureStart(env, message, "decision");
+    else if (action === "forecast") await handleAnalysisFeatureStart(env, message, "forecast");
+    else if (action === "backtest") await handleAnalysisFeatureStart(env, message, "backtest");
+    else if (action === "risk") await handleAnalysisHub(env, message);
+    else if (action === "automation") await handleAutomationHub(env, message);
+    else if (action === "news") await handleNews(env, message);
+    else if (action === "about") await handleAbout(env, message);
     else if (action === "myplan") await handleMyPlan(env, message);
     else if (action === "plans") await handleListPlans(env, message);
     else if (action === "cancel") await handleCancel(env, message);
@@ -132,7 +195,7 @@ async function routeCallbackQuery(env, callbackQuery) {
     await answerCallbackQuery(env, callbackQuery.id);
 
     if (action === "menu") {
-      await handleAdminMenu(env, { chat: callbackQuery.message.chat, from: callbackQuery.from });
+      await handleAdminMenu(env, { chat: callbackQuery.message.chat, from: callbackQuery.from, editMessageId: callbackQuery.message.message_id });
     } else if (action === "removelist") {
       await handleAdminListCallback(env, callbackQuery);
     } else if (action === "removepick") {
@@ -141,6 +204,8 @@ async function routeCallbackQuery(env, callbackQuery) {
       await handleAdminUserListCallback(env, callbackQuery, "add", Math.max(0, Number(value) || 0));
     } else if (action === "addpick") {
       await handleAdminAddCallback(env, callbackQuery, Number(value));
+    } else if (action === "addmanual") {
+      await handleAdminAddManualStart(env, callbackQuery);
     } else if (action === "planlist") {
       await handleAdminUserListCallback(env, callbackQuery, "plan", Math.max(0, Number(value) || 0));
     } else if (action === "planuser") {
@@ -167,11 +232,12 @@ async function routeCallbackQuery(env, callbackQuery) {
     const signalId = Number(data.split(":")[1]);
     const signal = await db.getSignalById(env, signalId);
     await answerCallbackQuery(env, callbackQuery.id);
-    if (!signal) {
+    if (!signal || String(signal.user_id) !== String(callbackQuery.from.id)) {
       await sendMessage(env, callbackQuery.message.chat.id, "این سیگنال پیدا نشد.");
       return;
     }
-    await sendMessage(env, callbackQuery.message.chat.id, formatDetailMessage(signal));
+    const metadata = await db.getSignalMetadata(env, signalId);
+    await sendMessage(env, callbackQuery.message.chat.id, formatDetailMessage(signal, metadata), mainMenuMarkup(await db.isAdmin(env, callbackQuery.from.id)));
     return;
   }
 
@@ -220,9 +286,12 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
-      checkOpenSignals(env)
-        .then((result) => console.log("checkOpenSignals", JSON.stringify(result)))
-        .catch((err) => console.error("checkOpenSignals failed", err))
+      Promise.allSettled([
+        checkOpenSignals(env).then((result) => console.log("checkOpenSignals", JSON.stringify(result))),
+        checkPriceAlerts(env).then((result) => console.log("checkPriceAlerts", JSON.stringify(result))),
+      ]).then((results) => {
+        for (const result of results) if (result.status === "rejected") console.error("scheduled automation failed", result.reason);
+      })
     );
   },
 };

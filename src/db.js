@@ -184,6 +184,153 @@ export async function updateSignalRequestStatus(env, requestId, status) {
   await env.DB.prepare("UPDATE signal_requests SET status = ? WHERE id = ?").bind(status, requestId).run();
 }
 
+export async function saveSignalFitRun(env, { requestId, userId, config, results }) {
+  await env.DB.prepare(
+    `INSERT INTO signal_fit_runs (request_id, user_id, config_json, results_json, status, updated_at)
+     VALUES (?, ?, ?, ?, 'awaiting_selection', datetime('now'))
+     ON CONFLICT(request_id) DO UPDATE SET
+       config_json = excluded.config_json,
+       results_json = excluded.results_json,
+       selected_basis = NULL,
+       selected_strategy_key = NULL,
+       status = 'awaiting_selection',
+       updated_at = datetime('now')`
+  )
+    .bind(requestId, userId, JSON.stringify(config), JSON.stringify(results))
+    .run();
+}
+
+export async function getSignalFitRun(env, requestId) {
+  const row = await env.DB.prepare(
+    `SELECT request_id, user_id, config_json, results_json, selected_basis,
+            selected_strategy_key, status, created_at, updated_at
+     FROM signal_fit_runs WHERE request_id = ?`
+  ).bind(requestId).first();
+  if (!row) return null;
+  return { ...row, config: JSON.parse(row.config_json), results: JSON.parse(row.results_json) };
+}
+
+export async function chooseSignalFitBasis(env, requestId, userId, basis) {
+  const { meta } = await env.DB.prepare(
+    `UPDATE signal_fit_runs SET selected_basis = ?, updated_at = datetime('now')
+     WHERE request_id = ? AND user_id = ? AND status = 'awaiting_selection'`
+  ).bind(basis, requestId, userId).run();
+  return meta.changes > 0;
+}
+
+export async function chooseSignalFitStrategy(env, requestId, userId, strategyKey) {
+  const { meta } = await env.DB.prepare(
+    `UPDATE signal_fit_runs
+     SET selected_strategy_key = ?, status = 'finalizing', updated_at = datetime('now')
+     WHERE request_id = ? AND user_id = ? AND status = 'awaiting_selection'`
+  ).bind(strategyKey, requestId, userId).run();
+  return meta.changes > 0;
+}
+
+export async function finishSignalFitRun(env, requestId, status) {
+  await env.DB.prepare(
+    "UPDATE signal_fit_runs SET status = ?, updated_at = datetime('now') WHERE request_id = ?"
+  ).bind(status, requestId).run();
+}
+
+export async function saveSignalMetadata(env, signalId, metadata) {
+  await env.DB.prepare(
+    `INSERT INTO signal_metadata (signal_id, metadata_json) VALUES (?, ?)
+     ON CONFLICT(signal_id) DO UPDATE SET metadata_json = excluded.metadata_json`
+  ).bind(signalId, JSON.stringify(metadata ?? {})).run();
+}
+
+export async function getSignalMetadata(env, signalId) {
+  const row = await env.DB.prepare("SELECT metadata_json FROM signal_metadata WHERE signal_id = ?").bind(signalId).first();
+  return row ? JSON.parse(row.metadata_json) : null;
+}
+
+// --- Operational automation: watchlist, alerts and journal ----------------
+
+export async function addWatchlistSymbol(env, userId, symbol, timeframe = "4h") {
+  await env.DB.prepare(
+    `INSERT INTO watchlist (user_id, symbol, timeframe) VALUES (?, ?, ?)
+     ON CONFLICT(user_id, symbol) DO UPDATE SET timeframe = excluded.timeframe`
+  ).bind(userId, symbol, timeframe).run();
+}
+
+export async function removeWatchlistSymbol(env, userId, symbol) {
+  const { meta } = await env.DB.prepare("DELETE FROM watchlist WHERE user_id = ? AND symbol = ?").bind(userId, symbol).run();
+  return meta.changes > 0;
+}
+
+export async function listWatchlist(env, userId) {
+  const { results } = await env.DB.prepare(
+    "SELECT symbol, timeframe, added_at FROM watchlist WHERE user_id = ? ORDER BY added_at DESC LIMIT 20"
+  ).bind(userId).all();
+  return results;
+}
+
+export async function createPriceAlert(env, { userId, symbol, condition, level, lastPrice = null }) {
+  const { meta } = await env.DB.prepare(
+    `INSERT INTO price_alerts (user_id, symbol, condition, level, last_price)
+     VALUES (?, ?, ?, ?, ?)`
+  ).bind(userId, symbol, condition, level, lastPrice).run();
+  return meta.last_row_id;
+}
+
+export async function listPriceAlerts(env, userId, { activeOnly = false } = {}) {
+  const where = activeOnly ? "AND status = 'active'" : "";
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM price_alerts WHERE user_id = ? ${where} ORDER BY created_at DESC LIMIT 30`
+  ).bind(userId).all();
+  return results;
+}
+
+export async function getActivePriceAlerts(env) {
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM price_alerts WHERE status = 'active' ORDER BY created_at LIMIT 200"
+  ).all();
+  return results;
+}
+
+export async function deletePriceAlert(env, userId, alertId) {
+  const { meta } = await env.DB.prepare("DELETE FROM price_alerts WHERE id = ? AND user_id = ?").bind(alertId, userId).run();
+  return meta.changes > 0;
+}
+
+export async function updatePriceAlerts(env, updates) {
+  if (!updates.length) return;
+  const active = env.DB.prepare("UPDATE price_alerts SET last_price = ? WHERE id = ? AND status = 'active'");
+  const triggered = env.DB.prepare(
+    "UPDATE price_alerts SET status = 'triggered', last_price = ?, triggered_price = ?, triggered_at = datetime('now') WHERE id = ? AND status = 'active'"
+  );
+  await env.DB.batch(updates.map((item) => item.triggered
+    ? triggered.bind(item.price, item.price, item.id)
+    : active.bind(item.price, item.id)));
+}
+
+export async function addJournalEntry(env, { userId, symbol = null, note }) {
+  const { meta } = await env.DB.prepare(
+    "INSERT INTO journal_entries (user_id, symbol, note) VALUES (?, ?, ?)"
+  ).bind(userId, symbol, note).run();
+  return meta.last_row_id;
+}
+
+export async function listJournalEntries(env, userId) {
+  const { results } = await env.DB.prepare(
+    "SELECT id, symbol, note, created_at FROM journal_entries WHERE user_id = ? ORDER BY created_at DESC LIMIT 20"
+  ).bind(userId).all();
+  return results;
+}
+
+export async function deleteJournalEntry(env, userId, entryId) {
+  const { meta } = await env.DB.prepare("DELETE FROM journal_entries WHERE id = ? AND user_id = ?").bind(entryId, userId).run();
+  return meta.changes > 0;
+}
+
+export async function listUserSignals(env, userId, limit = 20) {
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM signals WHERE user_id = ? ORDER BY opened_at DESC LIMIT ?`
+  ).bind(userId, Math.min(50, Math.max(1, Number(limit) || 20))).all();
+  return results;
+}
+
 export async function saveSignal(env, s) {
   const { meta } = await env.DB.prepare(
     `INSERT INTO signals (

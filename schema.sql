@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS signal_requests (
   leverage            REAL NOT NULL,
   stop_loss_percent   REAL NOT NULL,
   take_profit_percent REAL NOT NULL,
-  -- pending -> fitting (Workflow running) -> done | failed | no_profitable_strategy | flat
+  -- pending -> fitting -> awaiting_selection -> done | failed | no_profitable_strategy | flat | cancelled
   -- (no_profitable_strategy: nothing beat 0% in backtest. flat: something did,
   -- but that strategy isn't in a long/short position on the latest candle.)
   status              TEXT NOT NULL DEFAULT 'pending',
@@ -79,6 +79,55 @@ CREATE TABLE IF NOT EXISTS signals (
   resolved_price           REAL
 );
 
+-- Full per-strategy fit output is persisted between the two stages of the
+-- signal flow: (1) fit and show every strategy, (2) let the user choose the
+-- ranking basis and the exact strategy that may issue the signal.
+CREATE TABLE IF NOT EXISTS signal_fit_runs (
+  request_id            INTEGER PRIMARY KEY REFERENCES signal_requests(id),
+  user_id               INTEGER NOT NULL REFERENCES users(telegram_id),
+  config_json           TEXT NOT NULL,
+  results_json          TEXT NOT NULL,
+  selected_basis        TEXT,
+  selected_strategy_key TEXT,
+  status                TEXT NOT NULL DEFAULT 'awaiting_selection',
+  created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at            TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS signal_metadata (
+  signal_id      INTEGER PRIMARY KEY REFERENCES signals(id),
+  metadata_json  TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS watchlist (
+  user_id    INTEGER NOT NULL REFERENCES users(telegram_id),
+  symbol     TEXT NOT NULL,
+  timeframe  TEXT NOT NULL DEFAULT '4h',
+  added_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (user_id, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS price_alerts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL REFERENCES users(telegram_id),
+  symbol        TEXT NOT NULL,
+  condition     TEXT NOT NULL, -- above | below
+  level         REAL NOT NULL,
+  last_price    REAL,
+  status        TEXT NOT NULL DEFAULT 'active',
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  triggered_at  TEXT,
+  triggered_price REAL
+);
+
+CREATE TABLE IF NOT EXISTS journal_entries (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id     INTEGER NOT NULL REFERENCES users(telegram_id),
+  symbol      TEXT,
+  note        TEXT NOT NULL,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- If you already ran the Phase 1 schema against a real D1 database, run
 -- this once by hand (CREATE TABLE IF NOT EXISTS above won't add a column
 -- to an existing table):
@@ -87,6 +136,9 @@ CREATE TABLE IF NOT EXISTS signals (
 CREATE INDEX IF NOT EXISTS idx_signals_status        ON signals(status);
 CREATE INDEX IF NOT EXISTS idx_signals_user           ON signals(user_id, opened_at);
 CREATE INDEX IF NOT EXISTS idx_signal_requests_user   ON signal_requests(user_id, requested_at);
+CREATE INDEX IF NOT EXISTS idx_signal_fit_runs_user   ON signal_fit_runs(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_price_alerts_active    ON price_alerts(status, symbol);
+CREATE INDEX IF NOT EXISTS idx_journal_user           ON journal_entries(user_id, created_at);
 
 -- Seed plans. Tune the numbers freely -- this is just a sane starting point.
 INSERT OR IGNORE INTO plans (id, name, daily_signal_limit, max_open_signals) VALUES
