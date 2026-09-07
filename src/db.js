@@ -4,19 +4,19 @@
 // --- Admins ------------------------------------------------------------
 
 /**
- * Self-bootstrapping: the very first time the account named in
- * OWNER_TELEGRAM_ID (wrangler.toml) talks to the bot, and the admins table
- * is still empty, they're auto-promoted. After that this is a no-op --
- * admins are managed with /addadmin and /removeadmin from then on.
+ * The configured owner is permanent and self-healing: whenever they contact
+ * the bot, make sure their admin row exists even if another admin removed it.
  */
 export async function ensureBootstrapAdmin(env, telegramId, username) {
-  const { count } = await env.DB.prepare("SELECT COUNT(*) AS count FROM admins").first();
-  if (count > 0) return false;
-  if (String(telegramId) !== String(env.OWNER_TELEGRAM_ID)) return false;
-  await env.DB.prepare("INSERT INTO admins (telegram_id, username, added_by) VALUES (?, ?, NULL)")
+  if (!isOwner(env, telegramId)) return false;
+  const { meta } = await env.DB.prepare("INSERT OR IGNORE INTO admins (telegram_id, username, added_by) VALUES (?, ?, NULL)")
     .bind(telegramId, username ?? null)
     .run();
-  return true;
+  return meta.changes > 0;
+}
+
+export function isOwner(env, telegramId) {
+  return Boolean(env.OWNER_TELEGRAM_ID) && String(telegramId) === String(env.OWNER_TELEGRAM_ID);
 }
 
 export async function isAdmin(env, telegramId) {
@@ -25,12 +25,16 @@ export async function isAdmin(env, telegramId) {
 }
 
 export async function addAdmin(env, telegramId, addedBy, username) {
+  if (!isOwner(env, addedBy)) return false;
   await env.DB.prepare("INSERT OR IGNORE INTO admins (telegram_id, username, added_by) VALUES (?, ?, ?)")
     .bind(telegramId, username ?? null, addedBy)
     .run();
+  return true;
 }
 
-export async function removeAdmin(env, telegramId) {
+export async function removeAdmin(env, telegramId, removedBy = null) {
+  if (isOwner(env, telegramId)) return false;
+  if (!isOwner(env, removedBy)) return false;
   const { meta } = await env.DB.prepare("DELETE FROM admins WHERE telegram_id = ?").bind(telegramId).run();
   return meta.changes > 0;
 }

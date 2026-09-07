@@ -112,5 +112,8 @@ export async function handleFitCallback(env, callbackQuery) {
       "در حال بررسی وضعیت زنده و ساخت حدها و حجم پوزیشن با تنظیمات انتخابی شما…"
     );
     await env.SIGNAL_FIT_WORKFLOW.create({ params: { operation: "finalize", requestId, userId, chatId, strategyKey } });
+    return;
   }
+
+  await answerCallbackQuery(env, callbackQuery.id, "این گزینه‌ی انتخاب استراتژی معتبر نیست.");
 }

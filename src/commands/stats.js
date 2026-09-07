@@ -5,9 +5,10 @@ import { adminMenuKeyboard } from "./admin.js";
 export async function handleStats(env, message) {
   const s = await db.getStats(env);
   const chatId = message.chat.id;
+  const menu = adminMenuKeyboard(db.isOwner(env, message.from.id));
 
   if (s.total === 0) {
-    return sendMessage(env, chatId, "هنوز هیچ سیگنالی صادر نشده.", { reply_markup: adminMenuKeyboard() });
+    return sendMessage(env, chatId, "هنوز هیچ سیگنالی صادر نشده.", { reply_markup: menu });
   }
 
   const winRateLine = s.winRate == null ? "هنوز سیگنال بسته‌شده‌ای نیست" : `${s.winRate.toFixed(1)}٪`;
@@ -29,5 +30,5 @@ export async function handleStats(env, message) {
       .join("\n");
   }
 
-  return sendMessage(env, chatId, text, { reply_markup: adminMenuKeyboard() });
+  return sendMessage(env, chatId, text, { reply_markup: menu });
 }

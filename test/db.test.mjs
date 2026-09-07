@@ -30,12 +30,12 @@ test("ensureBootstrapAdmin ignores non-owner ids", async () => {
   assert.equal(await db.isAdmin(env, 111), false);
 });
 
-test("ensureBootstrapAdmin is a no-op once any admin exists", async () => {
+test("ensureBootstrapAdmin restores the permanent owner even when another admin already exists", async () => {
   const env = freshEnv("999");
-  await db.addAdmin(env, 111, null, "first_admin");
+  await db.addAdmin(env, 111, 999, "first_admin");
   const promoted = await db.ensureBootstrapAdmin(env, 999, "fardin");
-  assert.equal(promoted, false, "owner should NOT be auto-added once the admin table is non-empty");
-  assert.equal(await db.isAdmin(env, 999), false);
+  assert.equal(promoted, true);
+  assert.equal(await db.isAdmin(env, 999), true);
 });
 
 test("addAdmin / removeAdmin / listAdmins round-trip", async () => {
@@ -47,12 +47,25 @@ test("addAdmin / removeAdmin / listAdmins round-trip", async () => {
   const admins = await db.listAdmins(env);
   assert.equal(admins.length, 2);
 
-  const removed = await db.removeAdmin(env, 111);
+  const removed = await db.removeAdmin(env, 111, 999);
   assert.equal(removed, true, "removeAdmin should report true when a row was actually deleted");
   assert.equal(await db.isAdmin(env, 111), false);
 
-  const removedAgain = await db.removeAdmin(env, 111);
+  const removedAgain = await db.removeAdmin(env, 111, 999);
   assert.equal(removedAgain, false, "removing an id that isn't an admin should report false, not throw");
+});
+
+test("only the configured owner can add or remove admins and the owner cannot be removed", async () => {
+  const env = freshEnv();
+  await db.ensureBootstrapAdmin(env, 999, "owner");
+  assert.equal(await db.addAdmin(env, 222, 111, "blocked"), false);
+  assert.equal(await db.isAdmin(env, 222), false);
+
+  assert.equal(await db.addAdmin(env, 222, 999, "secondary"), true);
+  assert.equal(await db.removeAdmin(env, 222, 111), false);
+  assert.equal(await db.isAdmin(env, 222), true);
+  assert.equal(await db.removeAdmin(env, 999, 999), false);
+  assert.equal(await db.isAdmin(env, 999), true);
 });
 
 test("listUsersForAdminPicker pages newest users and can exclude admins", async () => {

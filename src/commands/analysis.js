@@ -219,7 +219,7 @@ async function execute(env, message, data) {
       else if (data.flow === "forecast") text = formatForecastAnalysis({ ...data, candles, blockSize: data.blockSize ?? 5 });
       else if (data.flow === "decision") text = formatDecisionAnalysis({ ...data, candles, leverage: data.leverage ?? 1 });
       else if (data.flow === "backtest") text = formatBacktestAnalysis({
-        ...data, candles, leverage: data.leverage ?? 1, direction: data.direction ?? "long",
+        ...data, candles, mode: data.backtestMode, leverage: data.leverage ?? 1, direction: data.direction ?? "long",
         stopLossPercent: data.exitMode === "roi" ? data.stopLossPercent ?? 0 : data.exitMode === "atr" ? (calculateATRPercent(candles) * 1.5 * (data.leverage ?? 1)) : 0,
         takeProfitPercent: data.exitMode === "roi" ? data.takeProfitPercent ?? 0 : data.exitMode === "atr" ? (calculateATRPercent(candles) * 3 * (data.leverage ?? 1)) : 0,
         riskPercent: data.riskPercent ?? 0,

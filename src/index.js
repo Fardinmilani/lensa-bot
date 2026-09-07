@@ -69,12 +69,15 @@ const PUBLIC_COMMANDS = {
 };
 
 const ADMIN_COMMANDS = {
-  addadmin: handleAddAdmin,
-  removeadmin: handleRemoveAdmin,
   listadmins: handleListAdmins,
   setplan: handleSetPlan,
   stats: handleStats,
   admin: handleAdminMenu,
+};
+
+const OWNER_COMMANDS = {
+  addadmin: handleAddAdmin,
+  removeadmin: handleRemoveAdmin,
 };
 
 async function routeMessage(env, message) {
@@ -94,9 +97,9 @@ async function routeMessage(env, message) {
   const session = await db.getSession(env, userId);
   if (session) {
     if (session.step.startsWith("admin_")) {
-      if (!(await db.isAdmin(env, userId))) {
+      if (!db.isOwner(env, userId)) {
         await db.clearSession(env, userId);
-        await sendMessage(env, message.chat.id, "این عملیات فقط برای ادمین‌هاست.");
+        await sendMessage(env, message.chat.id, "افزودن یا حذف ادمین فقط در اختیار مالک اصلی ربات است.");
         return;
       }
       await handleAdminSessionText(env, message, session);
@@ -133,11 +136,21 @@ async function routeMessage(env, message) {
     return;
   }
 
+  if (command in OWNER_COMMANDS) {
+    if (!db.isOwner(env, userId)) {
+      await sendMessage(env, message.chat.id, "این دستور فقط برای مالک اصلی ربات است.");
+      return;
+    }
+    await OWNER_COMMANDS[command](env, message, args);
+    return;
+  }
+
   await sendMessage(env, message.chat.id, `دستور ناشناخته.\n\n${HELP_TEXT}`, mainMenuMarkup(await db.isAdmin(env, userId)));
 }
 
 async function routeCallbackQuery(env, callbackQuery) {
   const data = callbackQuery.data ?? "";
+  await db.ensureBootstrapAdmin(env, callbackQuery.from.id, callbackQuery.from.username ?? null);
 
   if (data.startsWith("fit:")) {
     await handleFitCallback(env, callbackQuery);
@@ -156,6 +169,11 @@ async function routeCallbackQuery(env, callbackQuery) {
 
   if (data.startsWith("menu:")) {
     const action = data.split(":")[1];
+    const knownActions = new Set(["home", "signal", "market", "decision", "forecast", "backtest", "risk", "automation", "news", "about", "myplan", "plans", "cancel", "admin", "help"]);
+    if (!knownActions.has(action)) {
+      await answerCallbackQuery(env, callbackQuery.id, "این گزینه معتبر نیست؛ منوی اصلی را دوباره باز کن.");
+      return;
+    }
     if (action === "admin" && !(await db.isAdmin(env, callbackQuery.from.id))) {
       await answerCallbackQuery(env, callbackQuery.id, "این منو فقط برای ادمین‌هاست.");
       return;
@@ -192,6 +210,16 @@ async function routeCallbackQuery(env, callbackQuery) {
     }
 
     const [, action, value, extra] = data.split(":");
+    const knownActions = new Set(["menu", "removelist", "removepick", "addlist", "addpick", "addmanual", "planlist", "planuser", "planpick", "stats"]);
+    if (!knownActions.has(action)) {
+      await answerCallbackQuery(env, callbackQuery.id, "این گزینه مدیریتی معتبر نیست؛ منو را دوباره باز کن.");
+      return;
+    }
+    const ownerActions = new Set(["addlist", "addpick", "addmanual", "removepick"]);
+    if (ownerActions.has(action) && !db.isOwner(env, callbackQuery.from.id)) {
+      await answerCallbackQuery(env, callbackQuery.id, "افزودن یا حذف ادمین فقط برای مالک اصلی مجاز است.", { show_alert: true });
+      return;
+    }
     await answerCallbackQuery(env, callbackQuery.id);
 
     if (action === "menu") {
@@ -241,7 +269,7 @@ async function routeCallbackQuery(env, callbackQuery) {
     return;
   }
 
-  await answerCallbackQuery(env, callbackQuery.id);
+  await answerCallbackQuery(env, callbackQuery.id, "این دکمه دیگر معتبر نیست؛ منوی اصلی را دوباره باز کن.");
 }
 
 export default {
@@ -274,8 +302,18 @@ export default {
     const callbackQuery = update.callback_query;
     if (callbackQuery?.from && !callbackQuery.from.is_bot) {
       ctx.waitUntil(
-        routeCallbackQuery(env, callbackQuery).catch((err) => {
+        routeCallbackQuery(env, callbackQuery).catch(async (err) => {
           console.error("routeCallbackQuery failed", err);
+          let showAdminMenu = false;
+          try {
+            showAdminMenu = await db.isAdmin(env, callbackQuery.from.id);
+          } catch {
+            // The callback may have failed because D1 itself is unavailable.
+          }
+          await Promise.allSettled([
+            answerCallbackQuery(env, callbackQuery.id, "اجرای این گزینه با خطا روبه‌رو شد. دوباره امتحان کن.", { show_alert: true }),
+            sendMessage(env, callbackQuery.message.chat.id, "⚠️ اجرای این گزینه کامل نشد. از منوی اصلی دوباره وارد بخش موردنظر شو.", mainMenuMarkup(showAdminMenu)),
+          ]);
         })
       );
     }

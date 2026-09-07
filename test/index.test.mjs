@@ -42,6 +42,29 @@ function mockTelegramFetch() {
   return { calls, restore: () => (globalThis.fetch = original) };
 }
 
+function mockTelegramFetchWithKucoinCandles(count = 220) {
+  const calls = [];
+  const original = globalThis.fetch;
+  const step = 4 * 60 * 60;
+  const latest = Math.floor(Date.now() / 1000 / step) * step;
+  const rows = Array.from({ length: count }, (_, index) => {
+    const time = latest - index * step;
+    const base = 30000 + (count - index) * 18 + Math.sin(index / 5) * 240;
+    const open = base - 30;
+    const close = base + 30;
+    return [String(time), String(open), String(close), String(base + 110), String(base - 110), String(100 + index), String((100 + index) * close)];
+  });
+  globalThis.fetch = async (url, init) => {
+    const target = String(url);
+    if (target.includes("api.kucoin.com/api/v1/market/candles")) {
+      return new Response(JSON.stringify({ code: "200000", data: rows }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    calls.push({ url: target, body: init?.body ? JSON.parse(init.body) : null });
+    return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 });
+  };
+  return { calls, restore: () => (globalThis.fetch = original) };
+}
+
 function webhookRequest(update, secret = "test-secret") {
   return new Request("https://example.com/", {
     method: "POST",
@@ -349,6 +372,183 @@ test("signal detail buttons cannot expose another user's signal", async () => {
     const sent = tg.calls.find((call) => call.url.includes("sendMessage"));
     assert.match(sent.body.text, /پیدا نشد/);
     assert.doesNotMatch(sent.body.text, /جزئیات/);
+  } finally {
+    tg.restore();
+  }
+});
+
+test("every top-level, analysis-hub and automation-hub button produces a Telegram response", async () => {
+  const env = freshEnv();
+  env.SIGNAL_FIT_WORKFLOW = { create: async () => {} };
+  const tg = mockTelegramFetch();
+  try {
+    let ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeMessage("/start")), env, ctx);
+    await ctx.settle();
+
+    const callbacks = [
+      "menu:home", "menu:signal", "menu:market", "menu:decision", "menu:forecast",
+      "menu:backtest", "menu:risk", "menu:automation", "menu:news", "menu:about",
+      "menu:myplan", "menu:plans", "menu:help", "menu:cancel", "menu:admin",
+      "ana:hub", "ana:start:market", "ana:start:decision", "ana:start:forecast",
+      "ana:start:backtest", "ana:start:risk_position", "ana:start:risk_atr", "ana:start:risk_rr",
+      "auto:hub", "auto:watch", "auto:scan", "auto:alerts", "auto:alertadd",
+      "auto:journal", "auto:journaladd", "auto:signals",
+    ];
+
+    for (const data of callbacks) {
+      tg.calls.length = 0;
+      ctx = makeCtx();
+      await worker.fetch(webhookRequest(makeCallback(data)), env, ctx);
+      await ctx.settle();
+      assert.ok(tg.calls.some((call) => call.url.includes("answerCallbackQuery")), `${data} must acknowledge the click`);
+      assert.ok(
+        tg.calls.some((call) => call.url.includes("sendMessage") || call.url.includes("editMessageText")),
+        `${data} must update or send a visible message`
+      );
+      assert.equal(tg.calls.some((call) => call.body?.text?.includes("اجرای این گزینه کامل نشد")), false, `${data} must not hit the global error fallback`);
+    }
+  } finally {
+    tg.restore();
+  }
+});
+
+test("automation add/delete button flows persist watchlist, alerts and journal", async () => {
+  const env = freshEnv();
+  const tg = mockTelegramFetch();
+  try {
+    let ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeMessage("/start")), env, ctx);
+    await ctx.settle();
+    const tap = async (data) => {
+      const callbackCtx = makeCtx();
+      await worker.fetch(webhookRequest(makeCallback(data)), env, callbackCtx);
+      await callbackCtx.settle();
+    };
+    const type = async (text) => {
+      const messageCtx = makeCtx();
+      await worker.fetch(webhookRequest(makeMessage(text)), env, messageCtx);
+      await messageCtx.settle();
+    };
+
+    await tap("auto:watchadd");
+    await tap("auto:watchpick:BTCUSDT");
+    await tap("auto:watchtf:4h");
+    assert.equal((await db.listWatchlist(env, 999))[0].symbol, "BTCUSDT");
+
+    await tap("auto:alertadd");
+    await tap("auto:alertpick:ETHUSDT");
+    await tap("auto:alertcondition:above");
+    await type("5000");
+    const alert = (await db.listPriceAlerts(env, 999))[0];
+    assert.equal(alert.symbol, "ETHUSDT");
+    assert.equal(alert.condition, "above");
+    assert.equal(alert.level, 5000);
+
+    await tap("auto:journaladd");
+    await tap("auto:journalpick:none");
+    await type("بررسی سناریوی ورود بعد از تأیید روند");
+    const entry = (await db.listJournalEntries(env, 999))[0];
+    assert.match(entry.note, /تأیید روند/);
+
+    await tap(`auto:watchdel:BTCUSDT`);
+    await tap(`auto:alertdel:${alert.id}`);
+    await tap(`auto:journaldel:${entry.id}`);
+    assert.equal((await db.listWatchlist(env, 999)).length, 0);
+    assert.equal((await db.listPriceAlerts(env, 999)).length, 0);
+    assert.equal((await db.listJournalEntries(env, 999)).length, 0);
+  } finally {
+    tg.restore();
+  }
+});
+
+test("single-strategy backtest buttons execute only the selected strategy", async () => {
+  const env = freshEnv();
+  const tg = mockTelegramFetchWithKucoinCandles();
+  try {
+    let ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeMessage("/start")), env, ctx);
+    await ctx.settle();
+    const tap = async (data) => {
+      const callbackCtx = makeCtx();
+      await worker.fetch(webhookRequest(makeCallback(data)), env, callbackCtx);
+      await callbackCtx.settle();
+    };
+
+    await tap("ana:start:backtest");
+    await tap("ana:set:symbol:BTCUSDT");
+    await tap("ana:set:marketType:spot");
+    await tap("ana:set:timeframe:4h");
+    await tap("ana:set:days:30");
+    await tap("ana:set:backtestMode:single");
+    await tap("ana:set:strategyKey:emaCrossover");
+    await tap("ana:set:fee:0.1");
+    await tap("ana:set:fill:nextOpen");
+    await tap("ana:set:exitMode:none");
+    await tap("ana:set:accountSize:0");
+
+    const report = tg.calls.find((call) => call.body?.text?.includes("بک‌تست کامل"));
+    assert.ok(report, "the selected backtest must produce a final report");
+    assert.match(report.body.text, /تقاطع EMA/);
+    assert.doesNotMatch(report.body.text, /<b>2\./, "single mode must not silently run every strategy");
+  } finally {
+    tg.restore();
+  }
+});
+
+test("secondary admins cannot add or remove admins through commands or stale buttons", async () => {
+  const env = freshEnv();
+  const tg = mockTelegramFetch();
+  try {
+    let ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeMessage("/start", { id: 999 })), env, ctx);
+    await ctx.settle();
+    await db.addAdmin(env, 222, 999, "secondary");
+
+    tg.calls.length = 0;
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeMessage("/admin", { id: 222, username: "secondary" })), env, ctx);
+    await ctx.settle();
+    const menu = tg.calls.find((call) => call.url.includes("sendMessage"));
+    const menuButtons = menu.body.reply_markup.inline_keyboard.flat();
+    assert.equal(menuButtons.some((button) => button.callback_data === "adm:addlist:0"), false);
+
+    tg.calls.length = 0;
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback("adm:addlist:0", { id: 222 })), env, ctx);
+    await ctx.settle();
+    const deniedButton = tg.calls.find((call) => call.url.includes("answerCallbackQuery"));
+    assert.equal(deniedButton.body.show_alert, true);
+    assert.match(deniedButton.body.text, /مالک اصلی/);
+
+    tg.calls.length = 0;
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeMessage("/addadmin 333", { id: 222, username: "secondary" })), env, ctx);
+    await ctx.settle();
+    assert.equal(await dbIsAdmin(env, 333), false);
+    assert.match(tg.calls.find((call) => call.url.includes("sendMessage")).body.text, /مالک اصلی/);
+
+    ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback("adm:removepick:999", { id: 999 })), env, ctx);
+    await ctx.settle();
+    assert.equal(await dbIsAdmin(env, 999), true, "the permanent owner must never be removable");
+  } finally {
+    tg.restore();
+  }
+});
+
+test("callback failures always produce both an alert and a visible recovery message", async () => {
+  const env = freshEnv();
+  const tg = mockTelegramFetch();
+  env.DB = { prepare: () => { throw new Error("forced D1 outage"); } };
+  try {
+    const ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeCallback("menu:home")), env, ctx);
+    await ctx.settle();
+    const alert = tg.calls.find((call) => call.url.includes("answerCallbackQuery"));
+    const recovery = tg.calls.find((call) => call.url.includes("sendMessage"));
+    assert.equal(alert.body.show_alert, true);
+    assert.match(recovery.body.text, /کامل نشد/);
   } finally {
     tg.restore();
   }

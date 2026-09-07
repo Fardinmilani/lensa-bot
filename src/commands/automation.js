@@ -174,9 +174,13 @@ export async function handleAutomationCallback(env, callbackQuery) {
   if (action === "hub") return handleAutomationHub(env, message);
   if (action === "watch") return showWatchlist(env, message);
   if (action === "watchadd") return startWatchAdd(env, message);
-  if (action === "watchpick") return value === "custom"
-    ? (await db.setSession(env, message.from.id, "auto_watch_symbol", {}), sendMessage(env, message.chat.id, "نماد را بفرست؛ مثلاً AVAX یا AVAXUSDT:"))
-    : afterWatchSymbol(env, message, value);
+  if (action === "watchpick") {
+    if (value === "custom") {
+      await db.setSession(env, message.from.id, "auto_watch_symbol", {});
+      return sendOrEditMessage(env, message.chat.id, message.editMessageId, "نماد را بفرست؛ مثلاً AVAX یا AVAXUSDT:");
+    }
+    return afterWatchSymbol(env, message, value);
+  }
   if (action === "watchtf") {
     const session = await db.getSession(env, message.from.id);
     if (!session || session.step !== "auto_watch_timeframe") return sendMessage(env, message.chat.id, "فرم Watchlist منقضی شده؛ دوباره «افزودن نماد» را بزن.");
@@ -190,12 +194,17 @@ export async function handleAutomationCallback(env, callbackQuery) {
   if (action === "scan") return scanWatchlist(env, message);
   if (action === "alerts") return showAlerts(env, message);
   if (action === "alertadd") return startAlert(env, message);
-  if (action === "alertpick") return value === "custom"
-    ? (await db.setSession(env, message.from.id, "auto_alert_symbol", {}), sendMessage(env, message.chat.id, "نماد هشدار را بفرست؛ مثلاً BTC یا BTCUSDT:"))
-    : afterAlertSymbol(env, message, value);
+  if (action === "alertpick") {
+    if (value === "custom") {
+      await db.setSession(env, message.from.id, "auto_alert_symbol", {});
+      return sendOrEditMessage(env, message.chat.id, message.editMessageId, "نماد هشدار را بفرست؛ مثلاً BTC یا BTCUSDT:");
+    }
+    return afterAlertSymbol(env, message, value);
+  }
   if (action === "alertcondition") {
     const session = await db.getSession(env, message.from.id);
     if (!session || session.step !== "auto_alert_condition") return sendMessage(env, message.chat.id, "فرم هشدار منقضی شده؛ دوباره «هشدار جدید» را بزن.");
+    if (!new Set(["above", "below"]).has(value)) return sendMessage(env, message.chat.id, "جهت هشدار معتبر نیست؛ دوباره «هشدار جدید» را بزن.");
     await db.setSession(env, message.from.id, "auto_alert_level", { ...session.data, condition: value });
     return sendOrEditMessage(env, message.chat.id, message.editMessageId, "قیمت فعال‌شدن هشدار را بفرست:\n\nبرای لغو، /cancel را بفرست.");
   }
@@ -208,7 +217,7 @@ export async function handleAutomationCallback(env, callbackQuery) {
   if (action === "journalpick") {
     if (value === "custom") {
       await db.setSession(env, message.from.id, "auto_journal_symbol", {});
-      return sendMessage(env, message.chat.id, "نماد را بفرست؛ مثلاً BTC یا BTCUSDT:");
+      return sendOrEditMessage(env, message.chat.id, message.editMessageId, "نماد را بفرست؛ مثلاً BTC یا BTCUSDT:");
     }
     return afterJournalSymbol(env, message, value === "none" ? null : value);
   }
@@ -217,4 +226,5 @@ export async function handleAutomationCallback(env, callbackQuery) {
     return showJournal(env, message);
   }
   if (action === "signals") return showSignals(env, message);
+  return sendOrEditMessage(env, message.chat.id, message.editMessageId, "این گزینه دیگر معتبر نیست. از منوی اتوماسیون دوباره انتخاب کن.", { reply_markup: automationKeyboard() });
 }
