@@ -4,8 +4,8 @@
 
 ## چیکار می‌کنه
 
-1. `/signal` → می‌پرسه رمزارز، تایم‌فریم، لورج، درصد حد ضرر/سود
-2. یه Cloudflare Workflow همه‌ی ~۲۰ استراتژی رو (هرکدوم توی step جدای خودش، به‌خاطر سقف ۱۰ms CPU پلن رایگان) روی کندل‌های واقعی از Binance فیت می‌کنه
+1. از منوی دکمه‌ای «سیگنال جدید» → رمزارز، تایم‌فریم، لورج، حد ضرر، حد سود و تعداد روزهای بک‌تست انتخاب می‌شن
+2. یه Cloudflare Workflow همه‌ی ~۲۰ استراتژی رو (هرکدوم توی step جدای خودش، به‌خاطر سقف ۱۰ms CPU پلن رایگان) روی کندل‌های واقعی KuCoin فیت می‌کنه؛ CoinGecko هم fallback قطعی مسیرهای مسدود/خراب است
 3. استراتژی‌ای که هم بازدهیش مثبته هم بیشترین رو انتخاب می‌کنه (اگه هیچ‌کدوم مثبت نبود، سیگنالی صادر نمی‌شه)
 4. با همون استراتژی، وضعیت الان (long/short/flat) رو تصمیم می‌گیره و به کاربر می‌گه، با دکمه‌ی «جزئیات بیشتر» برای آمار کامل (Sharpe، Sortino، Max Drawdown، Profit Factor، ...)
 5. سیگنال با entry/SL/TP توی D1 ذخیره می‌شه
@@ -59,7 +59,7 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
   -d '{"url": "https://lensa-signal-bot.<subdomain>.workers.dev", "secret_token": "<TELEGRAM_WEBHOOK_SECRET>"}'
 ```
 
-**۸. تست:** `/start` بزن (ادمین می‌شی) → `/signal` رو امتحان کن.
+**۸. تست:** `/start` بزن (ادمین می‌شی) و از منوی دکمه‌ای «سیگنال جدید» رو انتخاب کن.
 
 ## دستورها
 
@@ -81,11 +81,11 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook" \
 ```bash
 npm test
 ```
-۳۸ تست: schema، منطق D1 (rate limit، پلن، ادمین)، parsing داده‌ی Binance، تشخیص TP/SL برای long و short، و کل Workflow فیت-و-تصمیم به‌صورت end-to-end (با mock کردن Binance و تلگرام). سه باگ واقعی هم حین ساخت پیدا و فیکس شدن -- جزئیات در پیام چت.
+تست‌ها schema، منطق D1 (rate limit، پلن، ادمین)، parsing و fallback داده‌ی KuCoin/CoinGecko، منو و ویزارد دکمه‌ای، تشخیص TP/SL برای long و short، و کل Workflow فیت‌و‌تصمیم را end-to-end پوشش می‌دهند.
 
-## محدودیت شناخته‌شده (صادقانه بگم)
+## منبع داده‌ی بازار
 
-من نمی‌تونم از این sandbox به api.telegram.org یا api.binance.com وصل بشم، پس تست‌ها همه‌شون روی mock انجام شدن + یه `wrangler deploy --dry-run` واقعی که کد رو با toolchain خود Cloudflare بستل کرده (بدون خطا، ۲۹ کیلوبایت gzip). تست زنده با ربات واقعی روی تلگرام هنوز لازمه -- طبیعتاً از سمت من ممکن نبود.
+مسیر اصلی API عمومی KuCoin است. درخواست‌های کندل به‌صورت صفحه‌بندی‌شده انجام می‌شوند تا بازه‌های طولانی مثل ۳۶۵ روز هم کامل دریافت شوند. اگر مسیر اصلی با 403/429/451، خطای سرور یا پاسخ غیر JSON روبه‌رو شود، ربات خودکار سراغ CoinGecko می‌رود و پیام HTML را به‌عنوان JSON parse نمی‌کند.
 
 ## ساختار
 
@@ -94,7 +94,7 @@ src/
   index.js                  webhook + مسیریابی پیام/دکمه‌ها + اسکلت اجرای cron
   telegram.js                 sendMessage / answerCallbackQuery / verifyWebhookSecret
   db.js                       همه‌ی کوئری‌های D1
-  marketData.js                گرفتن کندل و قیمت لحظه‌ای از Binance (مستقیم، بدون نیاز به پراکسی -- Worker خودش geo-block نمی‌خوره)
+  marketData.js                کندل و قیمت لحظه‌ای از KuCoin با fallback خودکار CoinGecko
   signalFormat.js               فرمت پیام‌های سیگنال/جزئیات/نتیجه
   commands/                    هندلر هر دستور (شامل ویزارد /signal)
   cron/checkOpenSignals.js      چک TP/SL هر ۱۰ دقیقه، batched

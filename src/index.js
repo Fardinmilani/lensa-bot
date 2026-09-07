@@ -16,7 +16,8 @@ import {
   handleAdminPlanUserCallback,
   handleAdminPlanPickCallback,
 } from "./commands/admin.js";
-import { handleSignalStart, handleWizardText, handleWizardCallback } from "./commands/signal.js";
+import { handleSignalStart, handleWizardText, handleWizardCallback, handleCancel } from "./commands/signal.js";
+import { mainMenuMarkup } from "./commands/menu.js";
 import { formatDetailMessage } from "./signalFormat.js";
 import { checkOpenSignals } from "./cron/checkOpenSignals.js";
 
@@ -44,8 +45,9 @@ const PUBLIC_COMMANDS = {
   start: handleStart,
   myplan: handleMyPlan,
   plans: handleListPlans,
-  help: async (env, message) => sendMessage(env, message.chat.id, HELP_TEXT),
+  help: async (env, message) => sendMessage(env, message.chat.id, HELP_TEXT, mainMenuMarkup(await db.isAdmin(env, message.from.id))),
   signal: handleSignalStart,
+  cancel: handleCancel,
 };
 
 const ADMIN_COMMANDS = {
@@ -59,6 +61,10 @@ const ADMIN_COMMANDS = {
 
 async function routeMessage(env, message) {
   const userId = message.from.id;
+
+  // Do this before routing so the configured owner sees the admin button on
+  // their very first /start response as well.
+  await db.ensureBootstrapAdmin(env, userId, message.from.username ?? null);
 
   // An in-progress /signal wizard owns the next text message (except
   // /cancel, which handleWizardText itself handles).
@@ -87,11 +93,34 @@ async function routeMessage(env, message) {
     return;
   }
 
-  await sendMessage(env, message.chat.id, `دستور ناشناخته.\n\n${HELP_TEXT}`);
+  await sendMessage(env, message.chat.id, `دستور ناشناخته.\n\n${HELP_TEXT}`, mainMenuMarkup(await db.isAdmin(env, userId)));
 }
 
 async function routeCallbackQuery(env, callbackQuery) {
   const data = callbackQuery.data ?? "";
+
+  if (data.startsWith("menu:")) {
+    const action = data.split(":")[1];
+    if (action === "admin" && !(await db.isAdmin(env, callbackQuery.from.id))) {
+      await answerCallbackQuery(env, callbackQuery.id, "این منو فقط برای ادمین‌هاست.");
+      return;
+    }
+    await answerCallbackQuery(env, callbackQuery.id);
+    const message = { chat: callbackQuery.message.chat, from: callbackQuery.from };
+    // A navigation button exits any half-finished signal wizard. Starting a
+    // fresh signal replaces the session itself; cancel has its own message.
+    if (action !== "signal" && action !== "cancel") {
+      await db.clearSession(env, callbackQuery.from.id);
+    }
+    if (action === "home") await handleStart(env, message);
+    else if (action === "signal") await handleSignalStart(env, message);
+    else if (action === "myplan") await handleMyPlan(env, message);
+    else if (action === "plans") await handleListPlans(env, message);
+    else if (action === "cancel") await handleCancel(env, message);
+    else if (action === "admin") await handleAdminMenu(env, message);
+    else if (action === "help") await sendMessage(env, message.chat.id, HELP_TEXT, mainMenuMarkup(await db.isAdmin(env, message.from.id)));
+    return;
+  }
 
   if (data.startsWith("adm:")) {
     if (!(await db.isAdmin(env, callbackQuery.from.id))) {
@@ -103,7 +132,7 @@ async function routeCallbackQuery(env, callbackQuery) {
     await answerCallbackQuery(env, callbackQuery.id);
 
     if (action === "menu") {
-      await handleAdminMenu(env, { chat: callbackQuery.message.chat });
+      await handleAdminMenu(env, { chat: callbackQuery.message.chat, from: callbackQuery.from });
     } else if (action === "removelist") {
       await handleAdminListCallback(env, callbackQuery);
     } else if (action === "removepick") {
@@ -119,7 +148,7 @@ async function routeCallbackQuery(env, callbackQuery) {
     } else if (action === "planpick") {
       await handleAdminPlanPickCallback(env, callbackQuery, Number(value), extra ?? "");
     } else if (action === "stats") {
-      await handleStats(env, { chat: callbackQuery.message.chat });
+      await handleStats(env, { chat: callbackQuery.message.chat, from: callbackQuery.from });
     }
     return;
   }
@@ -168,8 +197,6 @@ export default {
 
     const message = update.message;
     if (message?.from && !message.from.is_bot) {
-      // Cheap no-op after the very first call; see db.ensureBootstrapAdmin.
-      ctx.waitUntil(db.ensureBootstrapAdmin(env, message.from.id, message.from.username ?? null));
       ctx.waitUntil(
         routeMessage(env, message).catch((err) => {
           console.error("routeMessage failed", err);

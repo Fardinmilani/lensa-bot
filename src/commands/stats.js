@@ -1,12 +1,13 @@
 import { sendMessage, escapeHtml } from "../telegram.js";
 import * as db from "../db.js";
+import { adminMenuKeyboard } from "./admin.js";
 
 export async function handleStats(env, message) {
   const s = await db.getStats(env);
   const chatId = message.chat.id;
 
   if (s.total === 0) {
-    return sendMessage(env, chatId, "هنوز هیچ سیگنالی صادر نشده.");
+    return sendMessage(env, chatId, "هنوز هیچ سیگنالی صادر نشده.", { reply_markup: adminMenuKeyboard() });
   }
 
   const winRateLine = s.winRate == null ? "هنوز سیگنال بسته‌شده‌ای نیست" : `${s.winRate.toFixed(1)}٪`;
@@ -28,5 +29,5 @@ export async function handleStats(env, message) {
       .join("\n");
   }
 
-  return sendMessage(env, chatId, text);
+  return sendMessage(env, chatId, text, { reply_markup: adminMenuKeyboard() });
 }

@@ -98,6 +98,10 @@ test("/start bootstraps the owner as admin and replies via sendMessage", async (
     const sendCalls = tg.calls.filter((c) => c.url.includes("/sendMessage"));
     assert.equal(sendCalls.length, 1);
     assert.match(sendCalls[0].body.text, /خوش اومدی/);
+    assert.ok(
+      sendCalls[0].body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "menu:admin"),
+      "the owner's first /start response should already contain the admin button"
+    );
   } finally {
     tg.restore();
   }
@@ -207,6 +211,45 @@ test("/admin exposes button flows for adding admins and changing plans", async (
     await ctx.settle();
     const user = await env.DB.prepare("SELECT plan_id FROM users WHERE telegram_id = 333").first();
     assert.equal(user.plan_id, 2);
+  } finally {
+    tg.restore();
+  }
+});
+
+test("signal wizard is button-driven and asks for the backtest window", async () => {
+  const env = freshEnv();
+  const workflowCalls = [];
+  env.SIGNAL_FIT_WORKFLOW = { create: async (input) => workflowCalls.push(input) };
+  const tg = mockTelegramFetch();
+  try {
+    let ctx = makeCtx();
+    await worker.fetch(webhookRequest(makeMessage("/start")), env, ctx);
+    await ctx.settle();
+
+    const tap = async (data) => {
+      const callbackCtx = makeCtx();
+      await worker.fetch(webhookRequest(makeCallback(data)), env, callbackCtx);
+      await callbackCtx.settle();
+    };
+
+    tg.calls.length = 0;
+    await tap("menu:signal");
+    assert.ok(tg.calls.some((call) => call.body?.reply_markup?.inline_keyboard.flat().some((button) => button.callback_data === "wz:symbol:BTCUSDT")));
+    await tap("wz:symbol:BTCUSDT");
+    await tap("wz:tf:1d");
+    await tap("wz:lev:5");
+    await tap("wz:sl:2");
+    await tap("wz:tp:5");
+
+    const daysPrompt = tg.calls.at(-1);
+    assert.ok(daysPrompt.body.text.includes("چند روز اخیر"));
+    assert.ok(daysPrompt.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "wz:days:365"));
+
+    await tap("wz:days:365");
+    assert.equal(workflowCalls.length, 1);
+    assert.equal(workflowCalls[0].params.symbol, "BTCUSDT");
+    assert.equal(workflowCalls[0].params.timeframe, "1d");
+    assert.equal(workflowCalls[0].params.backtestDays, 365);
   } finally {
     tg.restore();
   }

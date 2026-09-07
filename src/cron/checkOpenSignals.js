@@ -32,7 +32,7 @@ export async function checkOpenSignals(env) {
   const notifications = [];
   for (const signal of open) {
     const price = prices[signal.symbol];
-    if (price == null) continue; // Binance didn't return this symbol this round; try again next tick
+    if (price == null) continue; // Market source didn't return this symbol this round; retry next tick
     const outcome = resolveOutcome(signal, price);
     if (!outcome) continue;
     resolutions.push({ id: signal.id, status: outcome, resolvedPrice: price });

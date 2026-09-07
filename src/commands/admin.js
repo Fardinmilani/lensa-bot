@@ -5,7 +5,7 @@ import * as db from "../db.js";
 
 const PICKER_PAGE_SIZE = 10;
 
-function adminMenuKeyboard() {
+export function adminMenuKeyboard() {
   return {
     inline_keyboard: [
       [
@@ -123,34 +123,35 @@ export async function handleAddAdmin(env, message, args) {
   const chatId = message.chat.id;
   const targetId = Number(args[0]);
   if (!args[0] || Number.isNaN(targetId)) {
-    return sendMessage(env, chatId, "استفاده درست: <code>/addadmin TELEGRAM_ID</code>");
+    return sendMessage(env, chatId, "استفاده درست: <code>/addadmin TELEGRAM_ID</code>", { reply_markup: adminMenuKeyboard() });
   }
   await db.addAdmin(env, targetId, message.from.id, args[1] ?? null);
-  return sendMessage(env, chatId, `✅ کاربر <code>${targetId}</code> به لیست ادمین‌ها اضافه شد.`);
+  return sendMessage(env, chatId, `✅ کاربر <code>${targetId}</code> به لیست ادمین‌ها اضافه شد.`, { reply_markup: adminMenuKeyboard() });
 }
 
 export async function handleRemoveAdmin(env, message, args) {
   const chatId = message.chat.id;
   const targetId = Number(args[0]);
   if (!args[0] || Number.isNaN(targetId)) {
-    return sendMessage(env, chatId, "استفاده درست: <code>/removeadmin TELEGRAM_ID</code>");
+    return sendMessage(env, chatId, "استفاده درست: <code>/removeadmin TELEGRAM_ID</code>", { reply_markup: adminMenuKeyboard() });
   }
   if (targetId === message.from.id) {
-    return sendMessage(env, chatId, "نمی‌تونی خودت رو حذف کنی.");
+    return sendMessage(env, chatId, "نمی‌تونی خودت رو حذف کنی.", { reply_markup: adminMenuKeyboard() });
   }
   const removed = await db.removeAdmin(env, targetId);
   return sendMessage(
     env,
     chatId,
-    removed ? `✅ کاربر <code>${targetId}</code> از لیست ادمین‌ها حذف شد.` : `کاربر <code>${targetId}</code> اصلاً ادمین نبود.`
+    removed ? `✅ کاربر <code>${targetId}</code> از لیست ادمین‌ها حذف شد.` : `کاربر <code>${targetId}</code> اصلاً ادمین نبود.`,
+    { reply_markup: adminMenuKeyboard() }
   );
 }
 
 export async function handleListAdmins(env, message) {
   const admins = await db.listAdmins(env);
-  if (admins.length === 0) return sendMessage(env, message.chat.id, "هیچ ادمینی ثبت نشده.");
+  if (admins.length === 0) return sendMessage(env, message.chat.id, "هیچ ادمینی ثبت نشده.", { reply_markup: adminMenuKeyboard() });
   const lines = admins.map((a) => `• <code>${a.telegram_id}</code>${a.username ? " @" + escapeHtml(a.username) : ""}`);
-  return sendMessage(env, message.chat.id, `👤 ادمین‌ها:\n${lines.join("\n")}`);
+  return sendMessage(env, message.chat.id, `👤 ادمین‌ها:\n${lines.join("\n")}`, { reply_markup: adminMenuKeyboard() });
 }
 
 export async function handleListPlans(env, message) {
@@ -159,7 +160,10 @@ export async function handleListPlans(env, message) {
     (p) =>
       `• <b>${escapeHtml(p.name)}</b> — سقف روزانه: ${p.daily_signal_limit ?? "نامحدود"}, سیگنال باز هم‌زمان: ${p.max_open_signals ?? "نامحدود"}`
   );
-  return sendMessage(env, message.chat.id, `📋 پلن‌ها:\n${lines.join("\n")}`);
+  const isAdmin = message.from ? await db.isAdmin(env, message.from.id) : false;
+  return sendMessage(env, message.chat.id, `📋 پلن‌ها:\n${lines.join("\n")}`, {
+    reply_markup: isAdmin ? adminMenuKeyboard() : { inline_keyboard: [[{ text: "↩️ منوی اصلی", callback_data: "menu:home" }]] },
+  });
 }
 
 export async function handleSetPlan(env, message, args) {
@@ -167,13 +171,14 @@ export async function handleSetPlan(env, message, args) {
   const targetId = Number(args[0]);
   const planName = args[1];
   if (!args[0] || Number.isNaN(targetId) || !planName) {
-    return sendMessage(env, chatId, "استفاده درست: <code>/setplan TELEGRAM_ID PLAN_NAME</code>");
+    return sendMessage(env, chatId, "استفاده درست: <code>/setplan TELEGRAM_ID PLAN_NAME</code>", { reply_markup: adminMenuKeyboard() });
   }
   await db.getOrCreateUser(env, targetId, null); // make sure the user row exists first
   const ok = await db.setUserPlanByName(env, targetId, planName);
   return sendMessage(
     env,
     chatId,
-    ok ? `✅ پلن کاربر <code>${targetId}</code> شد «${escapeHtml(planName)}».` : `پلنی به اسم «${escapeHtml(planName)}» وجود نداره. با /plans لیست رو ببین.`
+    ok ? `✅ پلن کاربر <code>${targetId}</code> شد «${escapeHtml(planName)}».` : `پلنی به اسم «${escapeHtml(planName)}» وجود نداره. با /plans لیست رو ببین.`,
+    { reply_markup: adminMenuKeyboard() }
   );
 }

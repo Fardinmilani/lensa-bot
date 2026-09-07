@@ -30,7 +30,7 @@ function fakeStep() {
   };
 }
 
-function binanceKlines(n, { trendPercentPerCandle = 0.6, seed = 42 } = {}) {
+function marketKlines(n, { trendPercentPerCandle = 0.6, seed = 42 } = {}) {
   let s = seed;
   const rand = () => {
     s |= 0;
@@ -59,8 +59,11 @@ function mockNetwork({ candleRows, telegramCalls = [] }) {
   const original = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     const u = String(url);
-    if (u.includes("api.binance.com/api/v3/klines")) {
-      return new Response(JSON.stringify(candleRows), { status: 200 });
+    if (u.includes("api.kucoin.com/api/v1/market/candles")) {
+      return new Response(JSON.stringify({
+        code: "200000",
+        data: candleRows.map(([time, open, high, low, close, volume]) => [String(Math.floor(time / 1000)), open, close, high, low, volume]),
+      }), { status: 200 });
     }
     if (u.includes("api.telegram.org")) {
       telegramCalls.push({ url: u, body: init?.body ? JSON.parse(init.body) : null });
@@ -93,7 +96,7 @@ test("happy path: a strategy is picked, a signal is saved and sent (when the win
 
     const telegramCalls = [];
     const restore = mockNetwork({
-      candleRows: binanceKlines(300, { trendPercentPerCandle: 0.6, seed }),
+      candleRows: marketKlines(300, { trendPercentPerCandle: 0.6, seed }),
       telegramCalls,
     });
     let result;
@@ -177,7 +180,7 @@ test("candle fetch failure marks the request failed and notifies the user, witho
   const original = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     const u = String(url);
-    if (u.includes("klines")) return new Response(JSON.stringify({ code: -1121, msg: "Invalid symbol." }), { status: 400 });
+    if (u.includes("market/candles")) return new Response(JSON.stringify({ code: "400100", msg: "Invalid symbol." }), { status: 400 });
     if (u.includes("telegram")) {
       telegramCalls.push({ body: JSON.parse(init.body) });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
@@ -226,7 +229,7 @@ test("a mid-fit strategy failure marks the request failed and still notifies the
   };
   globalThis.fetch = async (url, init) => {
     const u = String(url);
-    if (u.includes("api.binance.com/api/v3/klines")) return new Response(JSON.stringify(binanceKlines(300)), { status: 200 });
+    if (u.includes("api.kucoin.com/api/v1/market/candles")) return new Response(JSON.stringify({ code: "200000", data: marketKlines(300).map(([time, open, high, low, close, volume]) => [String(Math.floor(time / 1000)), open, close, high, low, volume]) }), { status: 200 });
     if (u.includes("api.telegram.org")) {
       telegramCalls.push({ body: JSON.parse(init.body) });
       return new Response(JSON.stringify({ ok: true }), { status: 200 });

@@ -6,23 +6,24 @@ import { sendMessage, escapeHtml } from "../telegram.js";
 import * as db from "../db.js";
 import { formatSignalMessage, formatNoStrategyMessage, formatFlatMessage } from "../signalFormat.js";
 
-// Lookback chosen from a real benchmark against this repo's own strategies
-// (see the PR description / chat history): at 300 candles the single
-// slowest strategy (donchianBreakout) averaged ~2.4ms warm, comfortably
-// under the 10ms-per-step budget with headroom for a colder isolate. Bump
-// this only after re-benchmarking the slowest strategy at the new size.
-const CANDLE_LOOKBACK = 300;
+const PERIODS_PER_DAY = { "15m": 96, "1h": 24, "4h": 6, "1d": 1 };
+
+function candleLookback(timeframe, backtestDays) {
+  const days = Number(backtestDays);
+  if (!Number.isFinite(days) || days <= 0) return 300; // backwards-compatible workflow payloads
+  return Math.max(1, Math.ceil(days * (PERIODS_PER_DAY[timeframe] ?? 1)));
+}
 
 const STRATEGY_ENTRIES = Object.entries(STRATEGIES).filter(([, s]) => s.category !== "benchmark");
 
 export class SignalFitWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
-    const { requestId, userId, chatId, symbol, timeframe, leverage, stopLossPercent, takeProfitPercent } = event.payload;
+    const { requestId, userId, chatId, symbol, timeframe, leverage, stopLossPercent, takeProfitPercent, backtestDays } = event.payload;
     const riskParams = { stopLossPercent, takeProfitPercent };
 
     let candles;
     try {
-      candles = await step.do("fetch-candles", async () => fetchCandles(symbol, timeframe, CANDLE_LOOKBACK));
+      candles = await step.do("fetch-candles", async () => fetchCandles(symbol, timeframe, candleLookback(timeframe, backtestDays)));
     } catch (err) {
       await step.do("notify-fetch-failed", async () => {
         await db.updateSignalRequestStatus(this.env, requestId, "failed");

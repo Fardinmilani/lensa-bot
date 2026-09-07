@@ -17,17 +17,18 @@ function freshEnv() {
   return { DB: createD1Shim(sqliteDb), TELEGRAM_BOT_TOKEN: "fake" };
 }
 
-function mockBinancePrices(priceMap) {
+function mockKucoinPrices(priceMap) {
   const original = globalThis.fetch;
   globalThis.fetch = async (url) => {
     const u = String(url);
     if (u.includes("/sendMessage")) return new Response(JSON.stringify({ ok: true }), { status: 200 });
-    // single-symbol shape
-    const single = u.match(/symbol=([A-Z0-9]+)/);
-    if (single) return new Response(JSON.stringify({ symbol: single[1], price: String(priceMap[single[1]]) }), { status: 200 });
-    // batched shape
-    const symbols = Object.keys(priceMap).map((s) => ({ symbol: s, price: String(priceMap[s]) }));
-    return new Response(JSON.stringify(symbols), { status: 200 });
+    if (u.includes("allTickers")) {
+      const ticker = Object.keys(priceMap).map((s) => ({ symbol: `${s.replace(/USDT$/, "")}-USDT`, last: String(priceMap[s]) }));
+      return new Response(JSON.stringify({ code: "200000", data: { ticker } }), { status: 200 });
+    }
+    const single = u.match(/symbol=([A-Z0-9-]+)/);
+    const symbol = single?.[1]?.replace(/-USDT$/, "USDT");
+    return new Response(JSON.stringify({ code: "200000", data: { price: String(priceMap[symbol]) } }), { status: 200 });
   };
   return () => (globalThis.fetch = original);
 }
@@ -59,7 +60,7 @@ async function seedSignal(env, { symbol = "BTCUSDT", direction = "long", entry =
 
 test("no open signals -> early return, no network calls", async () => {
   const env = freshEnv();
-  const restore = mockBinancePrices({});
+  const restore = mockKucoinPrices({});
   try {
     const result = await checkOpenSignals(env);
     assert.deepEqual(result, { checked: 0, resolved: 0 });
@@ -71,7 +72,7 @@ test("no open signals -> early return, no network calls", async () => {
 test("long signal resolves hit_tp when price rises past take_profit_price", async () => {
   const env = freshEnv();
   const id = await seedSignal(env, { direction: "long", entry: 100, sl: 98, tp: 105 });
-  const restore = mockBinancePrices({ BTCUSDT: 106 });
+  const restore = mockKucoinPrices({ BTCUSDT: 106 });
   try {
     const result = await checkOpenSignals(env);
     assert.equal(result.resolved, 1);
@@ -86,7 +87,7 @@ test("long signal resolves hit_tp when price rises past take_profit_price", asyn
 test("long signal resolves hit_sl when price falls past stop_loss_price", async () => {
   const env = freshEnv();
   const id = await seedSignal(env, { direction: "long", entry: 100, sl: 98, tp: 105 });
-  const restore = mockBinancePrices({ BTCUSDT: 97 });
+  const restore = mockKucoinPrices({ BTCUSDT: 97 });
   try {
     await checkOpenSignals(env);
     const signal = await db.getSignalById(env, id);
@@ -100,7 +101,7 @@ test("short signal: price falling hits take-profit, price rising hits stop-loss 
   const env = freshEnv();
   const tpId = await seedSignal(env, { symbol: "ETHUSDT", direction: "short", entry: 100, sl: 102, tp: 95 });
   const slId = await seedSignal(env, { symbol: "SOLUSDT", direction: "short", entry: 100, sl: 102, tp: 95 });
-  const restore = mockBinancePrices({ ETHUSDT: 94, SOLUSDT: 103 });
+  const restore = mockKucoinPrices({ ETHUSDT: 94, SOLUSDT: 103 });
   try {
     await checkOpenSignals(env);
     assert.equal((await db.getSignalById(env, tpId)).status, "hit_tp");
@@ -113,7 +114,7 @@ test("short signal: price falling hits take-profit, price rising hits stop-loss 
 test("signal between SL and TP stays open", async () => {
   const env = freshEnv();
   const id = await seedSignal(env, { direction: "long", entry: 100, sl: 98, tp: 105 });
-  const restore = mockBinancePrices({ BTCUSDT: 101 });
+  const restore = mockKucoinPrices({ BTCUSDT: 101 });
   try {
     const result = await checkOpenSignals(env);
     assert.equal(result.resolved, 0);
@@ -127,7 +128,7 @@ test("multiple open signals on the same symbol only need one price for both", as
   const env = freshEnv();
   const a = await seedSignal(env, { symbol: "BTCUSDT", direction: "long", entry: 100, sl: 98, tp: 105 });
   const b = await seedSignal(env, { symbol: "BTCUSDT", direction: "long", entry: 90, sl: 88, tp: 95 });
-  const restore = mockBinancePrices({ BTCUSDT: 106 });
+  const restore = mockKucoinPrices({ BTCUSDT: 106 });
   try {
     const result = await checkOpenSignals(env);
     assert.equal(result.resolved, 2); // both cross their (different) take-profits at 106
