@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeSymbol, fetchCandles, fetchCurrentPrice, MarketDataError } from "../src/marketData.js";
+import { normalizeSymbol, fetchCandles, fetchCurrentPrice, fetchCurrentPrices, MarketDataError } from "../src/marketData.js";
 
 function mockFetchOnce(status, jsonBody) {
   const original = globalThis.fetch;
@@ -70,6 +70,48 @@ test("fetchCandles turns an HTML/upstream response into a readable MarketDataErr
       () => fetchCandles("BTCUSDT", "4h", 300),
       (err) => err instanceof MarketDataError && /JSON معتبر نداد/.test(err.message) && !/Unexpected token/.test(err.message)
     );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("fetchCandles falls back to CoinGecko when Binance is geo-blocked", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("api.binance.com")) return new Response("<!DOCTYPE html>blocked", { status: 403 });
+    if (u.includes("api.coingecko.com/api/v3/coins/bitcoin/market_chart")) {
+      return new Response(JSON.stringify({
+        prices: [[1735689600000, 100], [1735776000000, 110], [1735862400000, 105]],
+        total_volumes: [[1735689600000, 10], [1735776000000, 11], [1735862400000, 12]],
+      }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch: ${u}`);
+  };
+  try {
+    const candles = await fetchCandles("BTCUSDT", "1d", 3);
+    assert.equal(candles.length, 3);
+    assert.equal(candles[0].open, 100);
+    assert.equal(candles[1].close, 110);
+    assert.equal(candles[2].volume, 12);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("current prices fall back to CoinGecko when Binance is geo-blocked", async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes("api.binance.com")) return new Response("<!DOCTYPE html>blocked", { status: 403 });
+    if (u.includes("api.coingecko.com/api/v3/simple/price")) {
+      return new Response(JSON.stringify({ bitcoin: { usd: 67123.45 }, ethereum: { usd: 3500 } }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch: ${u}`);
+  };
+  try {
+    assert.equal(await fetchCurrentPrice("BTCUSDT"), 67123.45);
+    assert.deepEqual(await fetchCurrentPrices(["BTCUSDT", "ETHUSDT"]), { BTCUSDT: 67123.45, ETHUSDT: 3500 });
   } finally {
     globalThis.fetch = original;
   }
