@@ -2,7 +2,7 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import { STRATEGIES, currentSignalState } from "../lib/strategies.js";
 import { calculateATR, positionSize as calculatePositionSize } from "../lib/risk.js";
 import { fitOneStrategy, fitOneStrategyOptimized, pickBest, labelText } from "../lib/singleStrategyFit.js";
-import { fetchCandles } from "../marketData.js";
+import { candleSourceLabel, fetchCandles } from "../marketData.js";
 import { sendMessage, escapeHtml } from "../telegram.js";
 import * as db from "../db.js";
 import { capPositionSize, calculateSignalLevels, formatSignalMessage, formatNoStrategyMessage, formatFlatMessage } from "../signalFormat.js";
@@ -102,6 +102,7 @@ async function sendFitReport(env, chatId, requestId, rows, config) {
     const lines = [
       `<b>نتایج فیت استراتژی‌ها · ${page + 1}/${pages.length}</b>`,
       `${escapeHtml(config.symbol)} · ${config.timeframe} · ${config.backtestDays} روز · ${config.marketType === "spot" ? "Spot" : `Futures ${config.leverage}x`}`,
+      `منبع داده: ${escapeHtml(candleSourceLabel(config.dataSource))}`,
       config.dataQuality ? `کیفیت داده: ${qualitySummary(config.dataQuality)}` : "",
       "",
     ];
@@ -141,10 +142,14 @@ async function notifyFailure(step, env, { requestId, chatId, symbol } = {}, err,
   try {
     await step.do(stepName, async () => {
       if (requestId) {
-        await db.updateSignalRequestStatus(env, requestId, "failed");
-        await db.finishSignalFitRun(env, requestId, "failed").catch(() => {});
+        try {
+          await db.updateSignalRequestStatus(env, requestId, "failed");
+          await db.finishSignalFitRun(env, requestId, "failed").catch(() => {});
+        } catch (databaseError) {
+          console.error("Could not persist failed signal request", databaseError);
+        }
       }
-      if (chatId) await sendMessage(env, chatId, `⚠️ یک خطای غیرمنتظره رخ داد و تحلیل ${escapeHtml(symbol || "درخواست")} کامل نشد.\n\nعلت: ${escapeHtml(message)}\n\nتنظیماتت از بین نرفته؛ دوباره از منوی سیگنال شروع کن.`);
+      if (chatId) await sendMessage(env, chatId, `⚠️ تحلیل ${escapeHtml(symbol || "درخواست")} کامل نشد.\n\nعلت: ${escapeHtml(message)}\n\nبرای تلاش مجدد از منوی سیگنال شروع کن؛ ربات پیش از فیت، دسترسی منبع انتخابی را دوباره بررسی می‌کند.`);
     });
   } catch (notifyError) {
     console.error("Could not notify signal fit failure", notifyError);
@@ -154,6 +159,15 @@ async function notifyFailure(step, env, { requestId, chatId, symbol } = {}, err,
 export class SignalFitWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
     const payload = event.payload;
+    try {
+      await step.do("ensure-operational-schema", async () => {
+        await db.ensureOperationalSchema(this.env);
+        return true;
+      });
+    } catch (error) {
+      await notifyFailure(step, this.env, payload, error, "notify-schema-error");
+      return { outcome: "schema_error", error: String(error?.message ?? error) };
+    }
     if (payload.operation === "finalize") return this.finalize(payload, step);
     return this.fit(payload, step);
   }
@@ -171,7 +185,7 @@ export class SignalFitWorkflow extends WorkflowEntrypoint {
     };
     let candles;
     try {
-      candles = await step.do("fetch-candles", async () => fetchCandles(config.symbol, config.timeframe, candleLookback(config.timeframe, config.backtestDays)));
+      candles = await step.do("fetch-candles", async () => fetchCandles(config.symbol, config.timeframe, candleLookback(config.timeframe, config.backtestDays), config.dataSource ?? "auto"));
       config.dataQuality = await step.do("validate-candles", async () => assertUsableCandles(candles, config.timeframe));
     } catch (err) {
       await notifyFailure(step, this.env, config, err, "notify-fetch-failed");
@@ -223,7 +237,7 @@ export class SignalFitWorkflow extends WorkflowEntrypoint {
       const selected = run.results.find((row) => row.key === payload.strategyKey);
       if (!selected) throw new Error("استراتژی انتخاب‌شده در نتیجه‌ی فیت وجود ندارد.");
       run.config.selectedBasis = run.selected_basis;
-      const candles = await step.do("refetch-candles", async () => fetchCandles(run.config.symbol, run.config.timeframe, candleLookback(run.config.timeframe, run.config.backtestDays)));
+      const candles = await step.do("refetch-candles", async () => fetchCandles(run.config.symbol, run.config.timeframe, candleLookback(run.config.timeframe, run.config.backtestDays), run.config.dataSource ?? "auto"));
       return await this.issueFromSelection({ config: run.config, selected, candles }, step, true);
     } catch (err) {
       await notifyFailure(step, this.env, run?.config ?? payload, err, "notify-finalize-error");

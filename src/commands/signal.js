@@ -1,6 +1,6 @@
-import { sendMessage, sendOrEditMessage, answerCallbackQuery } from "../telegram.js";
+import { sendMessage, sendOrEditMessage, answerCallbackQuery, escapeHtml } from "../telegram.js";
 import * as db from "../db.js";
-import { normalizeSymbol, VALID_TIMEFRAMES } from "../marketData.js";
+import { candleSourceLabel, checkCandleSources, normalizeSymbol, VALID_TIMEFRAMES } from "../marketData.js";
 import { mainMenuMarkup } from "./menu.js";
 
 const SYMBOL_OPTIONS = [
@@ -10,6 +10,7 @@ const SYMBOL_OPTIONS = [
 const BACKTEST_DAYS = {
   "15m": [7, 14, 30], "1h": [14, 30, 60, 90], "4h": [30, 60, 90, 180], "1d": [90, 180, 365],
 };
+const PERIODS_PER_DAY = { "15m": 96, "1h": 24, "4h": 6, "1d": 1 };
 
 function valueRows(values, prefix, label = String, perRow = 4) {
   const result = [];
@@ -19,10 +20,11 @@ function valueRows(values, prefix, label = String, perRow = 4) {
   return result;
 }
 
-function keyboard(buttonRows, { custom, skip, cancel = true } = {}) {
+function keyboard(buttonRows, { custom, skip, back = true, cancel = true } = {}) {
   const result = [...buttonRows];
   if (custom) result.push([{ text: `⌨️ ${custom.label}`, callback_data: custom.data }]);
   if (skip) result.push([{ text: `⏭ ${skip.label}`, callback_data: skip.data }]);
+  if (back) result.push([{ text: "⬅️ مرحله قبل", callback_data: "wz:back" }]);
   if (cancel) result.push([{ text: "❌ لغو و بازگشت", callback_data: "menu:cancel" }]);
   return { inline_keyboard: result };
 }
@@ -32,7 +34,7 @@ function symbolKeyboard() {
   for (let i = 0; i < SYMBOL_OPTIONS.length; i += 2) {
     result.push(SYMBOL_OPTIONS.slice(i, i + 2).map(([text, symbol]) => ({ text, callback_data: `wz:symbol:${symbol}` })));
   }
-  return keyboard(result, { custom: { label: "نماد دیگر", data: "wz:custom:symbol" } });
+  return keyboard(result, { custom: { label: "نماد دیگر", data: "wz:custom:symbol" }, back: false });
 }
 
 async function setAndAsk(env, userId, step, data, chatId, text, replyMarkup, editMessageId = null) {
@@ -57,6 +59,27 @@ async function askDays(env, message, data) {
   return setAndAsk(env, message.from.id, "signal_days", data, message.chat.id,
     "<b>بازه‌ی فیت و بک‌تست</b>\n\nتمام استراتژی‌ها روی چند روز اخیر فیت و بک‌تست شوند؟",
     keyboard(valueRows(options, "wz:days", (value) => `${value} روز`, 4)), message.editMessageId);
+}
+
+async function askDataSource(env, message, data) {
+  const requested = Math.max(60, Math.ceil(Number(data.backtestDays) * (PERIODS_PER_DAY[data.timeframe] ?? 1)));
+  await sendOrEditMessage(env, message.chat.id, message.editMessageId,
+    `⏳ در حال بررسی منبع‌های واقعی برای <b>${escapeHtml(data.symbol)}</b> · ${data.timeframe} · ${data.backtestDays} روز…`);
+  const checks = await checkCandleSources(data.symbol, data.timeframe, requested);
+  const available = checks.filter((item) => item.available);
+  const status = checks.map((item) =>
+    `${item.available ? "✅" : "❌"} <b>${item.label}</b> — ${item.available ? `${item.candleCount} کندل · ${item.latencyMs}ms` : escapeHtml(item.error)}`
+  ).join("\n");
+  const rows = available.map((item) => [{
+    text: `${item.kind === "exchange" ? "🏦" : "🌐"} ${item.label} · ${item.candleCount} کندل`,
+    callback_data: `wz:source:${item.id}`,
+  }]);
+  if (!available.length) rows.push([{ text: "🔄 بررسی دوباره", callback_data: "wz:retry:sources" }]);
+  const dataWithChecks = { ...data, sourceChecks: checks.map(({ id, label, available: ok, candleCount, requested: wanted }) => ({ id, label, available: ok, candleCount, requested: wanted })) };
+  await db.setSession(env, message.from.id, "signal_source", dataWithChecks);
+  return sendOrEditMessage(env, message.chat.id, message.editMessageId,
+    `<b>انتخاب منبع داده</b>\n\nفقط منبع‌هایی که همین الان برای نماد، تایم‌فریم و بازه‌ی انتخابی پاسخ سالم داده‌اند قابل انتخاب‌اند.\n\n${status}\n\n${available.length ? "تحلیل بر اساس دیتای کدام منبع انجام شود؟" : "فعلاً هیچ منبعی پوشش کافی ندارد؛ دوباره بررسی کن یا به مرحله قبل برگرد."}`,
+    { reply_markup: keyboard(rows) });
 }
 
 async function askDirection(env, message, data) {
@@ -150,6 +173,12 @@ async function askRiskPercent(env, message, data) {
     }), message.editMessageId);
 }
 
+async function askSymbol(env, message) {
+  return setAndAsk(env, message.from.id, "signal_symbol", {}, message.chat.id,
+    "<b>سیگنال حرفه‌ای Lensa</b>\n\nاول نماد را انتخاب می‌کنی؛ بعد ربات دسترسی زنده‌ی منبع‌های داده را برای همان بازه بررسی می‌کند.\n\nرمزارز را انتخاب کن:",
+    symbolKeyboard(), message.editMessageId);
+}
+
 export async function handleSignalStart(env, message) {
   const { id: userId, username } = message.from;
   await db.getOrCreateUser(env, userId, username ?? null);
@@ -158,8 +187,33 @@ export async function handleSignalStart(env, message) {
     const why = rate.reason === "daily_limit" ? `سقف روزانه‌ات (${rate.limit}) پر شده.` : `بیشتر از ${rate.limit} سیگنال باز هم‌زمان نمی‌توانی داشته باشی.`;
     return sendMessage(env, message.chat.id, `⛔ ${why}`, mainMenuMarkup(await db.isAdmin(env, userId)));
   }
-  return setAndAsk(env, userId, "signal_symbol", {}, message.chat.id,
-    "<b>سیگنال حرفه‌ای Lensa</b>\n\nاول بازار را انتخاب می‌کنیم، بعد همه‌ی استراتژی‌ها واقعاً فیت می‌شوند و خودت معیار و استراتژی نهایی را انتخاب می‌کنی.\n\nرمزارز را انتخاب کن:", symbolKeyboard(), message.editMessageId);
+  return askSymbol(env, message);
+}
+
+async function goBack(env, message, session) {
+  let step = session.step;
+  if (step === "signal_custom") {
+    step = {
+      leverage: "signal_leverage", feePercent: "signal_fee", stopLossPercent: "signal_stop_loss",
+      takeProfitPercent: "signal_take_profit", accountSize: "signal_account", riskPercent: "signal_risk",
+    }[session.data.pendingField] ?? "signal_symbol";
+  }
+  const data = { ...session.data };
+  delete data.pendingField;
+  if (step === "signal_market_type") return askSymbol(env, message);
+  if (step === "signal_timeframe") return askMarketType(env, message, data);
+  if (step === "signal_days") return askTimeframe(env, message, data);
+  if (step === "signal_source") return askDays(env, message, data);
+  if (step === "signal_direction") return askDataSource(env, message, data);
+  if (step === "signal_leverage") return askDirection(env, message, data);
+  if (step === "signal_fee") return data.marketType === "spot" ? askDataSource(env, message, data) : askLeverage(env, message, data);
+  if (step === "signal_fill") return askFee(env, message, data);
+  if (step === "signal_exit_mode") return askFill(env, message, data);
+  if (step === "signal_stop_loss") return askExitMode(env, message, data);
+  if (step === "signal_take_profit") return askStopLoss(env, message, data);
+  if (step === "signal_account") return data.exitMode === "atr" ? askExitMode(env, message, data) : askTakeProfit(env, message, data);
+  if (step === "signal_risk") return askAccountSize(env, message, data);
+  return askSymbol(env, message);
 }
 
 async function afterValue(env, message, session, field, value) {
@@ -167,7 +221,8 @@ async function afterValue(env, message, session, field, value) {
   if (field === "symbol") return askMarketType(env, message, data);
   if (field === "marketType") return askTimeframe(env, message, data);
   if (field === "timeframe") return askDays(env, message, data);
-  if (field === "backtestDays") return data.marketType === "spot"
+  if (field === "backtestDays") return askDataSource(env, message, data);
+  if (field === "dataSource") return data.marketType === "spot"
     ? askFee(env, message, { ...data, direction: "long", leverage: 1 })
     : askDirection(env, message, data);
   if (field === "direction") return askLeverage(env, message, data);
@@ -219,22 +274,34 @@ export async function handleWizardText(env, message, session) {
 export async function handleWizardCallback(env, callbackQuery, session) {
   const message = { chat: callbackQuery.message.chat, from: callbackQuery.from, editMessageId: callbackQuery.message.message_id };
   const [, kind, value] = callbackQuery.data.split(":");
+  if (kind === "back") {
+    await answerCallbackQuery(env, callbackQuery.id);
+    return goBack(env, message, session);
+  }
+  if (kind === "retry" && value === "sources" && session.step === "signal_source") {
+    await answerCallbackQuery(env, callbackQuery.id);
+    return askDataSource(env, message, session.data);
+  }
   if (kind === "custom") {
     const rule = customRule(value);
     if (!rule) return answerCallbackQuery(env, callbackQuery.id, "گزینه معتبر نیست.");
     await db.setSession(env, callbackQuery.from.id, "signal_custom", { ...session.data, pendingField: value });
     await answerCallbackQuery(env, callbackQuery.id);
-    return sendMessage(env, message.chat.id, `${rule.prompt}\n\nبرای لغو، /cancel را بفرست.`);
+    return sendMessage(env, message.chat.id, `${rule.prompt}\n\nمی‌توانی مقدار را بفرستی یا به مرحله قبل برگردی.`,
+      { reply_markup: keyboard([]) });
   }
   const expected = {
-    symbol: "signal_symbol", market: "signal_market_type", tf: "signal_timeframe", days: "signal_days",
+    symbol: "signal_symbol", market: "signal_market_type", tf: "signal_timeframe", days: "signal_days", source: "signal_source",
     dir: "signal_direction", lev: "signal_leverage", fee: "signal_fee", fill: "signal_fill",
     exit: "signal_exit_mode", sl: "signal_stop_loss", tp: "signal_take_profit", account: "signal_account", risk: "signal_risk",
   }[kind];
   if (!expected || session.step !== expected) return answerCallbackQuery(env, callbackQuery.id, "این دکمه دیگر مربوط به مرحله‌ی فعلی نیست.");
+  if (kind === "source" && !session.data.sourceChecks?.some((item) => item.id === value && item.available)) {
+    return answerCallbackQuery(env, callbackQuery.id, "این منبع در بررسی فعلی تأیید نشده؛ دوباره منابع را بررسی کن.", { show_alert: true });
+  }
   await answerCallbackQuery(env, callbackQuery.id);
   const field = {
-    symbol: "symbol", market: "marketType", tf: "timeframe", days: "backtestDays", dir: "direction",
+    symbol: "symbol", market: "marketType", tf: "timeframe", days: "backtestDays", source: "dataSource", dir: "direction",
     lev: "leverage", fee: "feePercent", fill: "fillTiming", exit: "exitMode", sl: "stopLossPercent",
     tp: "takeProfitPercent", account: "accountSize", risk: "riskPercent",
   }[kind];
@@ -256,6 +323,7 @@ async function startFit(env, message, data) {
   const exits = data.exitMode === "atr" ? "ATR خودکار" : `SL ${data.stopLossPercent}٪ / TP ${data.takeProfitPercent}٪ ROI`;
   await sendOrEditMessage(env, message.chat.id, message.editMessageId,
     `<b>فیت شروع شد</b> ⏳\n\n${data.symbol} · ${market}\n${data.timeframe} · ${data.backtestDays} روز · جهت ${data.direction}\n` +
+    `منبع داده: ${candleSourceLabel(data.dataSource)}\n` +
     `Fee ${data.feePercent}٪ · Fill ${data.fillTiming}\nحدها: ${exits}\n\n` +
     "بعد از پایان، اطلاعات همه‌ی استراتژی‌ها در چند پیام خوانا می‌آید. سپس معیار رتبه‌بندی و خود استراتژی را انتخاب می‌کنی."
   );

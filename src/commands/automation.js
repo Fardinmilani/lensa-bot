@@ -29,6 +29,10 @@ function symbolsKeyboard(prefix) {
   ] };
 }
 
+function backMarkup(callbackData, label) {
+  return { reply_markup: { inline_keyboard: [[{ text: `⬅️ ${label}`, callback_data: callbackData }], [{ text: "❌ لغو", callback_data: "menu:cancel" }]] } };
+}
+
 async function showWatchlist(env, message, notice = "") {
   const items = await db.listWatchlist(env, message.from.id);
   const keyboard = items.map((item) => [{ text: `❌ ${item.symbol}`, callback_data: `auto:watchdel:${item.symbol}` }]);
@@ -51,7 +55,8 @@ async function afterWatchSymbol(env, message, symbol) {
   return sendOrEditMessage(env, message.chat.id, message.editMessageId,
     `<b>${escapeHtml(clean)}</b>\n\nتایم‌فریم اسکن این نماد را انتخاب کن:`, { reply_markup: { inline_keyboard: [
       ["15m", "1h", "4h", "1d"].map((timeframe) => ({ text: timeframe, callback_data: `auto:watchtf:${timeframe}` })),
-      [{ text: "↩️ اتوماسیون", callback_data: "auto:hub" }],
+      [{ text: "⬅️ انتخاب نماد", callback_data: "auto:back:watchsymbol" }],
+      [{ text: "❌ لغو", callback_data: "menu:cancel" }],
     ] } });
 }
 
@@ -93,7 +98,8 @@ async function afterAlertSymbol(env, message, symbol) {
   await db.setSession(env, message.from.id, "auto_alert_condition", { symbol: clean });
   return sendOrEditMessage(env, message.chat.id, message.editMessageId, `<b>${clean}</b>\n\nهشدار هنگام عبور قیمت به کدام سمت فعال شود؟`, { reply_markup: { inline_keyboard: [
     [{ text: "⬆️ قیمت بالاتر رفت", callback_data: "auto:alertcondition:above" }, { text: "⬇️ قیمت پایین‌تر رفت", callback_data: "auto:alertcondition:below" }],
-    [{ text: "↩️ اتوماسیون", callback_data: "auto:hub" }],
+    [{ text: "⬅️ انتخاب نماد", callback_data: "auto:back:alertsymbol" }],
+    [{ text: "❌ لغو", callback_data: "menu:cancel" }],
   ] } });
 }
 
@@ -129,7 +135,8 @@ async function afterJournalSymbol(env, message, symbol = null) {
   const clean = symbol ? normalizeSymbol(symbol) : null;
   await db.setSession(env, message.from.id, "auto_journal_note", { symbol: clean });
   return sendOrEditMessage(env, message.chat.id, message.editMessageId,
-    `${clean ? `<b>${escapeHtml(clean)}</b>\n\n` : ""}یادداشت کاملت را در یک پیام بفرست. متن بدون خلاصه‌شدن ذخیره می‌شود.\n\nبرای لغو، /cancel را بفرست.`);
+    `${clean ? `<b>${escapeHtml(clean)}</b>\n\n` : ""}یادداشت کاملت را در یک پیام بفرست. متن بدون خلاصه‌شدن ذخیره می‌شود.\n\nبرای لغو، /cancel را بفرست.`,
+    backMarkup("auto:back:journalsymbol", "انتخاب نماد"));
 }
 
 async function showSignals(env, message) {
@@ -172,12 +179,22 @@ export async function handleAutomationCallback(env, callbackQuery) {
   const message = { chat: callbackQuery.message.chat, from: callbackQuery.from, editMessageId: callbackQuery.message.message_id };
   await answerCallbackQuery(env, callbackQuery.id);
   if (action === "hub") return handleAutomationHub(env, message);
+  if (action === "back") {
+    if (value === "watchsymbol") return startWatchAdd(env, message);
+    if (value === "alertsymbol") return startAlert(env, message);
+    if (value === "alertcondition") {
+      const session = await db.getSession(env, message.from.id);
+      return session?.data?.symbol ? afterAlertSymbol(env, message, session.data.symbol) : startAlert(env, message);
+    }
+    if (value === "journalsymbol") return startJournalEntry(env, message);
+    return handleAutomationHub(env, message);
+  }
   if (action === "watch") return showWatchlist(env, message);
   if (action === "watchadd") return startWatchAdd(env, message);
   if (action === "watchpick") {
     if (value === "custom") {
       await db.setSession(env, message.from.id, "auto_watch_symbol", {});
-      return sendOrEditMessage(env, message.chat.id, message.editMessageId, "نماد را بفرست؛ مثلاً AVAX یا AVAXUSDT:");
+      return sendOrEditMessage(env, message.chat.id, message.editMessageId, "نماد را بفرست؛ مثلاً AVAX یا AVAXUSDT:", backMarkup("auto:back:watchsymbol", "انتخاب نماد"));
     }
     return afterWatchSymbol(env, message, value);
   }
@@ -197,7 +214,7 @@ export async function handleAutomationCallback(env, callbackQuery) {
   if (action === "alertpick") {
     if (value === "custom") {
       await db.setSession(env, message.from.id, "auto_alert_symbol", {});
-      return sendOrEditMessage(env, message.chat.id, message.editMessageId, "نماد هشدار را بفرست؛ مثلاً BTC یا BTCUSDT:");
+      return sendOrEditMessage(env, message.chat.id, message.editMessageId, "نماد هشدار را بفرست؛ مثلاً BTC یا BTCUSDT:", backMarkup("auto:back:alertsymbol", "انتخاب نماد"));
     }
     return afterAlertSymbol(env, message, value);
   }
@@ -206,7 +223,7 @@ export async function handleAutomationCallback(env, callbackQuery) {
     if (!session || session.step !== "auto_alert_condition") return sendMessage(env, message.chat.id, "فرم هشدار منقضی شده؛ دوباره «هشدار جدید» را بزن.");
     if (!new Set(["above", "below"]).has(value)) return sendMessage(env, message.chat.id, "جهت هشدار معتبر نیست؛ دوباره «هشدار جدید» را بزن.");
     await db.setSession(env, message.from.id, "auto_alert_level", { ...session.data, condition: value });
-    return sendOrEditMessage(env, message.chat.id, message.editMessageId, "قیمت فعال‌شدن هشدار را بفرست:\n\nبرای لغو، /cancel را بفرست.");
+    return sendOrEditMessage(env, message.chat.id, message.editMessageId, "قیمت فعال‌شدن هشدار را بفرست:\n\nبرای لغو، /cancel را بفرست.", backMarkup("auto:back:alertcondition", "انتخاب جهت هشدار"));
   }
   if (action === "alertdel") {
     await db.deletePriceAlert(env, message.from.id, Number(value));
@@ -217,7 +234,7 @@ export async function handleAutomationCallback(env, callbackQuery) {
   if (action === "journalpick") {
     if (value === "custom") {
       await db.setSession(env, message.from.id, "auto_journal_symbol", {});
-      return sendOrEditMessage(env, message.chat.id, message.editMessageId, "نماد را بفرست؛ مثلاً BTC یا BTCUSDT:");
+      return sendOrEditMessage(env, message.chat.id, message.editMessageId, "نماد را بفرست؛ مثلاً BTC یا BTCUSDT:", backMarkup("auto:back:journalsymbol", "انتخاب نماد"));
     }
     return afterJournalSymbol(env, message, value === "none" ? null : value);
   }

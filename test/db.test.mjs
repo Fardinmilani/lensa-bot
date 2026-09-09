@@ -235,6 +235,21 @@ test("interactive fit results persist through basis and strategy selection", asy
   assert.equal(selected.selected_strategy_key, "emaCrossover");
 });
 
+test("ensureOperationalSchema self-heals missing production tables", async () => {
+  const env = freshEnv();
+  for (const table of ["signal_fit_runs", "signal_metadata", "watchlist", "price_alerts", "journal_entries"]) {
+    await env.DB.prepare(`DROP TABLE ${table}`).run();
+  }
+  await env.DB.prepare("ALTER TABLE signals DROP COLUMN backtest_detail_json").run();
+  await db.ensureOperationalSchema(env);
+  for (const table of ["signal_fit_runs", "signal_metadata", "watchlist", "price_alerts", "journal_entries"]) {
+    const row = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").bind(table).first();
+    assert.equal(row?.name, table);
+  }
+  const { results: signalColumns } = await env.DB.prepare("PRAGMA table_info(signals)").all();
+  assert.equal(signalColumns.some((column) => column.name === "backtest_detail_json"), true);
+});
+
 test("watchlist, alerts and journal persist per user", async () => {
   const env = freshEnv();
   await db.getOrCreateUser(env, 555, "u");

@@ -82,6 +82,7 @@ const OWNER_COMMANDS = {
 
 async function routeMessage(env, message) {
   const userId = message.from.id;
+  await db.ensureOperationalSchema(env);
 
   // Do this before routing so the configured owner sees the admin button on
   // their very first /start response as well.
@@ -150,6 +151,7 @@ async function routeMessage(env, message) {
 
 async function routeCallbackQuery(env, callbackQuery) {
   const data = callbackQuery.data ?? "";
+  await db.ensureOperationalSchema(env);
   await db.ensureBootstrapAdmin(env, callbackQuery.from.id, callbackQuery.from.username ?? null);
 
   if (data.startsWith("fit:")) {
@@ -324,12 +326,14 @@ export default {
 
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
-      Promise.allSettled([
-        checkOpenSignals(env).then((result) => console.log("checkOpenSignals", JSON.stringify(result))),
-        checkPriceAlerts(env).then((result) => console.log("checkPriceAlerts", JSON.stringify(result))),
-      ]).then((results) => {
+      db.ensureOperationalSchema(env).then(() =>
+        Promise.allSettled([
+          checkOpenSignals(env).then((result) => console.log("checkOpenSignals", JSON.stringify(result))),
+          checkPriceAlerts(env).then((result) => console.log("checkPriceAlerts", JSON.stringify(result))),
+        ])
+      ).then((results) => {
         for (const result of results) if (result.status === "rejected") console.error("scheduled automation failed", result.reason);
-      })
+      }).catch((error) => console.error("scheduled schema bootstrap failed", error))
     );
   },
 };

@@ -1,6 +1,83 @@
 // All D1 access lives here so commands/* stay free of SQL. Every function
 // takes `env` (env.DB is the D1 binding configured in wrangler.toml).
 
+const operationalSchemaPromises = new WeakMap();
+const OPERATIONAL_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS signal_fit_runs (
+    request_id INTEGER PRIMARY KEY REFERENCES signal_requests(id),
+    user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+    config_json TEXT NOT NULL,
+    results_json TEXT NOT NULL,
+    selected_basis TEXT,
+    selected_strategy_key TEXT,
+    status TEXT NOT NULL DEFAULT 'awaiting_selection',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE TABLE IF NOT EXISTS signal_metadata (
+    signal_id INTEGER PRIMARY KEY REFERENCES signals(id),
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+  )`,
+  `CREATE TABLE IF NOT EXISTS watchlist (
+    user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL DEFAULT '4h',
+    added_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, symbol)
+  )`,
+  `CREATE TABLE IF NOT EXISTS price_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+    symbol TEXT NOT NULL,
+    condition TEXT NOT NULL,
+    level REAL NOT NULL,
+    last_price REAL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    triggered_at TEXT,
+    triggered_price REAL
+  )`,
+  `CREATE TABLE IF NOT EXISTS journal_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(telegram_id),
+    symbol TEXT,
+    note TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_signal_fit_runs_user ON signal_fit_runs(user_id, created_at)",
+  "CREATE INDEX IF NOT EXISTS idx_price_alerts_active ON price_alerts(status, symbol)",
+  "CREATE INDEX IF NOT EXISTS idx_journal_user ON journal_entries(user_id, created_at)",
+];
+
+/** Self-heals additive production tables when a deploy happens before the D1 migration. */
+export async function ensureOperationalSchema(env) {
+  if (!env?.DB || (typeof env.DB !== "object" && typeof env.DB !== "function")) throw new Error("D1 binding is unavailable.");
+  const existing = operationalSchemaPromises.get(env.DB);
+  if (existing) return existing;
+  const pending = (async () => {
+    await env.DB.batch(OPERATIONAL_SCHEMA.map((sql) => env.DB.prepare(sql)));
+    const { results: signalColumns } = await env.DB.prepare("PRAGMA table_info(signals)").all();
+    if (!signalColumns.some((column) => column.name === "backtest_detail_json")) {
+      try {
+        await env.DB.prepare("ALTER TABLE signals ADD COLUMN backtest_detail_json TEXT").run();
+      } catch (error) {
+        // Two fresh Worker isolates can race on the first request after a
+        // deploy. Treat the losing ALTER as success only if the other isolate
+        // really added the column; otherwise preserve the original failure.
+        const { results: refreshedColumns } = await env.DB.prepare("PRAGMA table_info(signals)").all();
+        if (!refreshedColumns.some((column) => column.name === "backtest_detail_json")) throw error;
+      }
+    }
+    return true;
+  })()
+    .catch((error) => {
+      operationalSchemaPromises.delete(env.DB);
+      throw error;
+    });
+  operationalSchemaPromises.set(env.DB, pending);
+  return pending;
+}
+
 // --- Admins ------------------------------------------------------------
 
 /**

@@ -271,7 +271,7 @@ test("signal wizard is button-driven and asks for the backtest window", async ()
   const env = freshEnv();
   const workflowCalls = [];
   env.SIGNAL_FIT_WORKFLOW = { create: async (input) => workflowCalls.push(input) };
-  const tg = mockTelegramFetch();
+  const tg = mockTelegramFetchWithKucoinCandles(400);
   try {
     let ctx = makeCtx();
     await worker.fetch(webhookRequest(makeMessage("/start")), env, ctx);
@@ -286,6 +286,9 @@ test("signal wizard is button-driven and asks for the backtest window", async ()
     tg.calls.length = 0;
     await tap("menu:signal");
     assert.ok(tg.calls.some((call) => call.body?.reply_markup?.inline_keyboard.flat().some((button) => button.callback_data === "wz:symbol:BTCUSDT")));
+    await tap("wz:custom:symbol");
+    assert.ok(tg.calls.at(-1).body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "wz:back"));
+    await tap("wz:back");
     await tap("wz:symbol:BTCUSDT");
     await tap("wz:market:futures");
     await tap("wz:tf:1d");
@@ -293,6 +296,11 @@ test("signal wizard is button-driven and asks for the backtest window", async ()
     assert.ok(daysPrompt.body.text.includes("چند روز اخیر"));
     assert.ok(daysPrompt.body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "wz:days:365"));
     await tap("wz:days:365");
+    assert.ok(tg.calls.at(-1).body.text.includes("منبع داده"));
+    await tap("wz:back");
+    assert.ok(tg.calls.at(-1).body.text.includes("چند روز اخیر"));
+    await tap("wz:days:365");
+    await tap("wz:source:kucoin");
     await tap("wz:dir:both");
     await tap("wz:lev:5");
     await tap("wz:fee:0.1");
@@ -308,6 +316,7 @@ test("signal wizard is button-driven and asks for the backtest window", async ()
     assert.equal(workflowCalls[0].params.backtestDays, 365);
     assert.equal(workflowCalls[0].params.marketType, "futures");
     assert.equal(workflowCalls[0].params.leverage, 5);
+    assert.equal(workflowCalls[0].params.dataSource, "kucoin");
   } finally {
     tg.restore();
   }
@@ -433,6 +442,9 @@ test("automation add/delete button flows persist watchlist, alerts and journal",
 
     await tap("auto:watchadd");
     await tap("auto:watchpick:BTCUSDT");
+    await tap("auto:back:watchsymbol");
+    assert.ok(tg.calls.at(-1).body.reply_markup.inline_keyboard.flat().some((button) => button.callback_data === "auto:watchpick:BTCUSDT"));
+    await tap("auto:watchpick:BTCUSDT");
     await tap("auto:watchtf:4h");
     assert.equal((await db.listWatchlist(env, 999))[0].symbol, "BTCUSDT");
 
@@ -480,6 +492,10 @@ test("single-strategy backtest buttons execute only the selected strategy", asyn
     await tap("ana:set:marketType:spot");
     await tap("ana:set:timeframe:4h");
     await tap("ana:set:days:30");
+    await tap("ana:set:dataSource:kucoin");
+    await tap("ana:back");
+    assert.ok(tg.calls.at(-1).body.text.includes("منبع داده"));
+    await tap("ana:set:dataSource:kucoin");
     await tap("ana:set:backtestMode:single");
     await tap("ana:set:strategyKey:emaCrossover");
     await tap("ana:set:fee:0.1");

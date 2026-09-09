@@ -1,5 +1,5 @@
 import { answerCallbackQuery, escapeHtml, sendLongMessage, sendMessage, sendOrEditMessage } from "../telegram.js";
-import { fetchCandles, normalizeSymbol, VALID_TIMEFRAMES } from "../marketData.js";
+import { candleSourceLabel, checkCandleSources, fetchCandles, normalizeSymbol, VALID_TIMEFRAMES } from "../marketData.js";
 import { STRATEGIES } from "../lib/strategies.js";
 import { labelText } from "../lib/singleStrategyFit.js";
 import * as db from "../db.js";
@@ -44,12 +44,12 @@ export async function handleAnalysisHub(env, message) {
 }
 
 function sequence(data) {
-  const common = ["symbol", "timeframe", "days"];
+  const common = ["symbol", "timeframe", "days", "dataSource"];
   if (data.flow === "market") return common;
   if (data.flow === "forecast") return [...common, "horizon", "method", ...(data.method === "blockBootstrap" ? ["blockSize"] : []), "driftMode", "sims"];
-  if (data.flow === "decision") return ["symbol", "marketType", "timeframe", "days", ...(data.marketType === "futures" ? ["leverage"] : []), "accountSize", ...(Number(data.accountSize) > 0 ? ["riskPercent"] : []), "fee", "slippage"];
+  if (data.flow === "decision") return ["symbol", "marketType", "timeframe", "days", "dataSource", ...(data.marketType === "futures" ? ["leverage"] : []), "accountSize", ...(Number(data.accountSize) > 0 ? ["riskPercent"] : []), "fee", "slippage"];
   if (data.flow === "backtest") return [
-    "symbol", "marketType", "timeframe", "days",
+    "symbol", "marketType", "timeframe", "days", "dataSource",
     ...(data.marketType === "futures" ? ["direction", "leverage"] : []),
     "backtestMode", ...(data.backtestMode === "single" ? ["strategyKey"] : []),
     "fee", "fill", "exitMode", ...(data.exitMode === "roi" ? ["stopLossPercent", "takeProfitPercent"] : []),
@@ -70,7 +70,8 @@ function chunkRows(buttons, size = 4) {
 function withNav(rows, customField = null) {
   const result = [...rows];
   if (customField) result.push([{ text: "⌨️ مقدار دلخواه", callback_data: `ana:custom:${customField}` }]);
-  result.push([{ text: "↩️ ابزارهای Lensa", callback_data: "ana:hub" }, { text: "❌ لغو", callback_data: "menu:cancel" }]);
+  result.push([{ text: "⬅️ مرحله قبل", callback_data: "ana:back" }, { text: "↩️ ابزارهای Lensa", callback_data: "ana:hub" }]);
+  result.push([{ text: "❌ لغو", callback_data: "menu:cancel" }]);
   return { inline_keyboard: result };
 }
 
@@ -83,6 +84,12 @@ function options(field, data) {
   if (field === "marketType") return withNav([[button("🟢 Spot", "spot"), button("⚡ Futures", "futures")]]);
   if (field === "timeframe") return withNav([VALID_TIMEFRAMES.map((tf) => button(tf, tf))]);
   if (field === "days") return withNav(chunkRows([7, 14, 30, 60, 90, 180, 365].map((v) => button(`${v} روز`, v)), 4));
+  if (field === "dataSource") {
+    const available = (data.sourceChecks ?? []).filter((item) => item.available);
+    const rows = available.map((item) => [{ text: `🏦 ${item.label} · ${item.candleCount} کندل`, callback_data: `ana:set:dataSource:${item.id}` }]);
+    if (!available.length) rows.push([{ text: "🔄 بررسی دوباره", callback_data: "ana:retry:sources" }]);
+    return withNav(rows);
+  }
   if (field === "horizon") return withNav(chunkRows([12, 24, 48, 72, 120, 240].map((v) => button(`${v} کندل`, v)), 3), "horizon");
   if (field === "method") return withNav([[button("Bootstrap", "bootstrap"), button("Block Bootstrap", "blockBootstrap")], [button("GBM", "gbm")]]);
   if (field === "blockSize") return withNav([chunkRows([3, 5, 10, 20].map((v) => button(String(v), v)), 4)[0]], "blockSize");
@@ -120,6 +127,7 @@ function prompt(field, data, index, total) {
   const body = {
     symbol: "دارایی را انتخاب کن.", marketType: "نوع بازار را انتخاب کن.", timeframe: "تایم‌فریم کندل‌ها را انتخاب کن.",
     days: "طول تاریخچه‌ی مورد استفاده را انتخاب کن.", horizon: "افق آینده چند کندل باشد؟", method: "روش شبیه‌سازی را انتخاب کن.",
+    dataSource: "منبع داده را از بین گزینه‌هایی که همین الان برای این نماد و بازه تأیید شده‌اند انتخاب کن.",
     blockSize: "اندازه‌ی بلوک بازنمونه‌گیری را انتخاب کن.", driftMode: "فرض Drift را انتخاب کن.", sims: "دقت/تعداد مسیرهای شبیه‌سازی را انتخاب کن.",
     direction: "جهت معامله را انتخاب کن.", leverage: "لورج را انتخاب کن یا مقدار دلخواه بده.", backtestMode: "یک استراتژی یا مقایسه‌ی کامل؟",
     strategyKey: "استراتژی را انتخاب کن.", fee: "کارمزد هر سمت معامله را مشخص کن.", slippage: "لغزش قیمت هر سمت را مشخص کن.",
@@ -136,8 +144,17 @@ async function askCurrent(env, message, data) {
   const field = fields.find((name) => data[name] === undefined);
   if (!field) return execute(env, message, data);
   const index = fields.indexOf(field);
-  await db.setSession(env, message.from.id, `analysis_${field}`, data);
-  return sendOrEditMessage(env, message.chat.id, message.editMessageId, prompt(field, data, index, fields.length), { reply_markup: options(field, data) });
+  let nextData = data;
+  let extraText = "";
+  if (field === "dataSource") {
+    await sendOrEditMessage(env, message.chat.id, message.editMessageId,
+      `⏳ در حال بررسی منبع‌های داده برای <b>${escapeHtml(data.symbol)}</b> · ${data.timeframe} · ${data.days} روز…`);
+    const checks = await checkCandleSources(data.symbol, data.timeframe, candleCount(data.timeframe, data.days));
+    nextData = { ...data, sourceChecks: checks.map(({ id, label, available, candleCount: count, requested, error }) => ({ id, label, available, candleCount: count, requested, error })) };
+    extraText = "\n\n" + checks.map((item) => `${item.available ? "✅" : "❌"} <b>${item.label}</b> — ${item.available ? `${item.candleCount} کندل` : escapeHtml(item.error)}`).join("\n");
+  }
+  await db.setSession(env, message.from.id, `analysis_${field}`, nextData);
+  return sendOrEditMessage(env, message.chat.id, message.editMessageId, prompt(field, nextData, index, fields.length) + extraText, { reply_markup: options(field, nextData) });
 }
 
 async function startFlow(env, message, flow) {
@@ -151,7 +168,7 @@ export async function handleAnalysisFeatureStart(env, message, flow) {
 }
 
 function parseValue(field, raw) {
-  if (["symbol", "marketType", "timeframe", "method", "driftMode", "direction", "backtestMode", "strategyKey", "fill", "exitMode"].includes(field)) return raw;
+  if (["symbol", "marketType", "timeframe", "dataSource", "method", "driftMode", "direction", "backtestMode", "strategyKey", "fill", "exitMode"].includes(field)) return raw;
   return Number(raw);
 }
 
@@ -181,6 +198,19 @@ export async function handleAnalysisText(env, message, session) {
   return askCurrent(env, message, data);
 }
 
+async function goBack(env, message, session) {
+  const data = { ...session.data };
+  const currentField = session.step === "analysis_custom" ? data.pendingField : session.step.replace(/^analysis_/, "");
+  delete data.pendingField;
+  const fields = sequence(data);
+  const currentIndex = fields.indexOf(currentField);
+  if (currentIndex <= 0) return handleAnalysisHub(env, message);
+  const previousIndex = currentIndex - 1;
+  for (const field of fields.slice(previousIndex)) delete data[field];
+  if (fields[previousIndex] === "dataSource") delete data.sourceChecks;
+  return askCurrent(env, message, data);
+}
+
 export async function handleAnalysisCallback(env, callbackQuery) {
   const [, action, fieldOrFlow, rawValue] = callbackQuery.data.split(":");
   const message = { chat: callbackQuery.message.chat, from: callbackQuery.from, editMessageId: callbackQuery.message.message_id };
@@ -194,13 +224,27 @@ export async function handleAnalysisCallback(env, callbackQuery) {
   }
   const session = await db.getSession(env, callbackQuery.from.id);
   if (!session || !session.step.startsWith("analysis_")) return answerCallbackQuery(env, callbackQuery.id, "این فرم دیگر فعال نیست.");
+  if (action === "back") {
+    await answerCallbackQuery(env, callbackQuery.id);
+    return goBack(env, message, session);
+  }
+  if (action === "retry" && fieldOrFlow === "sources" && session.step === "analysis_dataSource") {
+    const data = { ...session.data };
+    delete data.sourceChecks;
+    await answerCallbackQuery(env, callbackQuery.id);
+    return askCurrent(env, message, data);
+  }
   if (action === "custom") {
     if (session.step !== `analysis_${fieldOrFlow}`) return answerCallbackQuery(env, callbackQuery.id, "این دکمه مربوط به مرحله‌ی فعلی نیست.");
     await db.setSession(env, callbackQuery.from.id, "analysis_custom", { ...session.data, pendingField: fieldOrFlow });
     await answerCallbackQuery(env, callbackQuery.id);
-    return sendMessage(env, message.chat.id, "مقدار دلخواه را در یک پیام بفرست:");
+    return sendMessage(env, message.chat.id, "مقدار دلخواه را در یک پیام بفرست یا به مرحله قبل برگرد:",
+      { reply_markup: withNav([]) });
   }
   if (action !== "set" || session.step !== `analysis_${fieldOrFlow}`) return answerCallbackQuery(env, callbackQuery.id, "این دکمه مربوط به مرحله‌ی فعلی نیست.");
+  if (fieldOrFlow === "dataSource" && !session.data.sourceChecks?.some((item) => item.id === rawValue && item.available)) {
+    return answerCallbackQuery(env, callbackQuery.id, "این منبع در بررسی فعلی تأیید نشده است.", { show_alert: true });
+  }
   await answerCallbackQuery(env, callbackQuery.id);
   return askCurrent(env, message, { ...session.data, [fieldOrFlow]: parseValue(fieldOrFlow, rawValue) });
 }
@@ -213,7 +257,7 @@ async function execute(env, message, data) {
     if (data.flow === "risk_position") text = formatPositionSize(data);
     else if (data.flow === "risk_rr") text = formatRiskReward(data);
     else {
-      const candles = await fetchCandles(data.symbol, data.timeframe, candleCount(data.timeframe, data.days));
+      const candles = await fetchCandles(data.symbol, data.timeframe, candleCount(data.timeframe, data.days), data.dataSource);
       assertUsableCandles(candles, data.timeframe);
       if (data.flow === "market") text = formatMarketAnalysis({ ...data, candles });
       else if (data.flow === "forecast") text = formatForecastAnalysis({ ...data, candles, blockSize: data.blockSize ?? 5 });
@@ -226,7 +270,8 @@ async function execute(env, message, data) {
       });
       else if (data.flow === "risk_atr") text = formatAtrRisk({ ...data, candles });
     }
-    return sendLongMessage(env, message.chat.id, text, { reply_markup: analysisHubKeyboard() });
+    const sourceLine = data.dataSource ? `<b>منبع داده: ${escapeHtml(candleSourceLabel(data.dataSource))}</b>\n\n` : "";
+    return sendLongMessage(env, message.chat.id, sourceLine + text, { reply_markup: analysisHubKeyboard() });
   } catch (err) {
     console.error("analysis flow failed", err);
     return sendMessage(env, message.chat.id,

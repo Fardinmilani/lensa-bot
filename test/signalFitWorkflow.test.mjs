@@ -247,7 +247,7 @@ test("a mid-fit strategy failure marks the request failed and still notifies the
     assert.equal(result.outcome, "error");
     const req = await env.DB.prepare("SELECT status FROM signal_requests WHERE id = ?").bind(requestId).first();
     assert.equal(req.status, "failed");
-    assert.ok(telegramCalls.some((call) => call.body?.text?.includes("خطای غیرمنتظره")), "user should receive the mid-fit failure message");
+    assert.ok(telegramCalls.some((call) => call.body?.text?.includes("تحلیل BTCUSDT کامل نشد")), "user should receive the mid-fit failure message");
   } finally {
     STRATEGIES[key].generateSignals = originalGenerateSignals;
     globalThis.fetch = originalFetch;

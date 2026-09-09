@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizeSymbol, fetchCandles, fetchCurrentPrice, fetchCurrentPrices, MarketDataError } from "../src/marketData.js";
+import { checkCandleSources, normalizeSymbol, fetchCandles, fetchCurrentPrice, fetchCurrentPrices, MarketDataError } from "../src/marketData.js";
 
 function mockFetchOnce(status, jsonBody) {
   const original = globalThis.fetch;
@@ -73,6 +73,44 @@ test("fetchCandles turns an HTML/upstream response into a readable MarketDataErr
       () => fetchCandles("BTCUSDT", "4h", 300),
       (err) => err instanceof MarketDataError && /JSON معتبر نداد/.test(err.message) && !/Unexpected token/.test(err.message)
     );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("an explicitly selected source never silently falls back to another exchange", async () => {
+  const calls = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return new Response("<!DOCTYPE html>blocked", { status: 403 });
+  };
+  try {
+    await assert.rejects(() => fetchCandles("BTCUSDT", "4h", 60, "kucoin"), MarketDataError);
+    assert.equal(calls.some((url) => url.includes("bitget.com") || url.includes("coingecko.com")), false);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("source availability probes the requested pair and exposes only healthy coverage", async () => {
+  const original = globalThis.fetch;
+  const now = Math.floor(Date.now() / 1000 / 86400) * 86400;
+  const kucoinRows = Array.from({ length: 60 }, (_, i) => {
+    const price = 100 + i;
+    return [String(now - i * 86400), String(price), String(price + 1), String(price + 2), String(price - 1), "10", "0"];
+  });
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes("kucoin.com")) return new Response(JSON.stringify({ code: "200000", data: kucoinRows }), { status: 200 });
+    if (target.includes("bitget.com")) return new Response(JSON.stringify({ code: "40017", msg: "not available" }), { status: 404 });
+    throw new Error(`unexpected fetch: ${target}`);
+  };
+  try {
+    const checks = await checkCandleSources("BTCUSDT", "1d", 60);
+    assert.equal(checks.find((item) => item.id === "kucoin").available, true);
+    assert.equal(checks.find((item) => item.id === "bitget").available, false);
+    assert.equal(checks.some((item) => item.id === "coingecko"), false, "aggregators are fallback-only, not presented as exchanges");
   } finally {
     globalThis.fetch = original;
   }

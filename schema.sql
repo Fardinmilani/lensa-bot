@@ -128,10 +128,9 @@ CREATE TABLE IF NOT EXISTS journal_entries (
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- If you already ran the Phase 1 schema against a real D1 database, run
--- this once by hand (CREATE TABLE IF NOT EXISTS above won't add a column
--- to an existing table):
---   ALTER TABLE signals ADD COLUMN backtest_detail_json TEXT;
+-- Existing production databases are upgraded additively by
+-- db.ensureOperationalSchema() on the Worker/Workflow. Running this full
+-- schema remotely remains the preferred deployment step.
 
 CREATE INDEX IF NOT EXISTS idx_signals_status        ON signals(status);
 CREATE INDEX IF NOT EXISTS idx_signals_user           ON signals(user_id, opened_at);

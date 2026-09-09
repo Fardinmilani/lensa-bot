@@ -1,4 +1,5 @@
 import { escapeHtml } from "./telegram.js";
+import { candleSourceLabel } from "./marketData.js";
 
 function fmt(n, decimals = 2) {
   return Number(n).toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
@@ -96,10 +97,12 @@ export function formatSignalMessage({
   accountRiskAmount,
   positionCapped,
   marginRequired,
+  dataSource,
 }) {
   const marketLabel = marketType === "futures" ? `Futures · ${leverage}x` : "Spot";
   return (
-    `🎯 <b>${escapeHtml(symbol)}</b> · ${escapeHtml(timeframe)} · ${marketLabel}\n\n` +
+    `🎯 <b>${escapeHtml(symbol)}</b> · ${escapeHtml(timeframe)} · ${marketLabel}\n` +
+    (dataSource ? `منبع داده: <b>${escapeHtml(candleSourceLabel(dataSource))}</b>\n` : "") + `\n` +
     `پوزیشن: <b>${DIRECTION_FA[direction] ?? escapeHtml(direction)}</b>\n` +
     `استراتژی انتخابی: ${escapeHtml(strategyLabel)}\n\n` +
     `ورود: <code>${fmt(entryPrice)}</code>\n` +
@@ -126,6 +129,7 @@ export function formatDetailMessage(signal, metadata = null) {
   const lines = [`📈 <b>جزئیات ${escapeHtml(signal.symbol)} / ${escapeHtml(signal.strategy_label)}</b>`, ""];
   if (metadata?.marketType) lines.push(`بازار: ${metadata.marketType === "futures" ? `Futures ${metadata.leverage}x` : "Spot"}`);
   if (metadata?.backtestDays) lines.push(`بازه‌ی بک‌تست: ${metadata.backtestDays} روز`);
+  if (metadata?.dataSource) lines.push(`منبع داده: ${escapeHtml(candleSourceLabel(metadata.dataSource))}`);
   if (metadata?.selectedBasis) lines.push(`معیار انتخاب: ${escapeHtml(metadata.selectedBasis)}`);
   if (metadata?.feePercent != null) lines.push(`کارمزد هر سمت: ${metadata.feePercent}٪`);
   if (metadata?.fillTiming) lines.push(`زمان اجرا: ${metadata.fillTiming === "nextOpen" ? "بازشدن کندل بعد" : "بسته‌شدن همان کندل"}`);
@@ -172,16 +176,18 @@ export function formatDetailMessage(signal, metadata = null) {
   return lines.join("\n");
 }
 
-export function formatNoStrategyMessage({ symbol, timeframe }) {
+export function formatNoStrategyMessage({ symbol, timeframe, dataSource }) {
   return (
     `🤔 هیچ‌کدوم از استراتژی‌ها روی <b>${escapeHtml(symbol)}</b> (${escapeHtml(timeframe)}) توی این بازه بازدهی مثبت نداشتن.\n` +
+    (dataSource ? `منبع داده: ${escapeHtml(candleSourceLabel(dataSource))}\n` : "") +
     `فعلاً سیگنالی صادر نمی‌کنم — بعداً دوباره امتحان کن.`
   );
 }
 
-export function formatFlatMessage({ symbol, timeframe, strategyLabel }) {
+export function formatFlatMessage({ symbol, timeframe, strategyLabel, dataSource }) {
   return (
     `📍 استراتژی انتخابی <b>${escapeHtml(strategyLabel)}</b> روی <b>${escapeHtml(symbol)}</b> (${escapeHtml(timeframe)}) فیت و بررسی شد،\n` +
+    (dataSource ? `منبع داده: ${escapeHtml(candleSourceLabel(dataSource))}\n` : "") +
     `ولی همین الان توی حالت flat‌ـه (نه long نه short). فعلاً پوزیشنی پیشنهاد نمی‌شه.`
   );
 }
